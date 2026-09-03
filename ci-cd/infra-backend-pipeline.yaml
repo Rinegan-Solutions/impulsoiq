@@ -1,0 +1,1376 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ImpulsoIQ Backend Infra CI/CD Pipeline - CodePipeline with GitHub, CodeBuild for Terraform (dev + test + prod)'
+
+# ─── Pre-flight ────────────────────────────────────────────────────────────────
+# 1. SSM parameter must exist (AVAILABLE status):
+#      /impulsoiq/cicd/codeconnections_arn
+# 2. Terraform state bucket:
+#      aws s3 mb s3://impulsoiq-tf-state --region eu-west-2
+# 3. Terraform lock table:
+#      aws dynamodb create-table --table-name impulsoiq-tf-lock \
+#        --attribute-definitions AttributeName=LockID,AttributeType=S \
+#        --key-schema AttributeName=LockID,KeyType=HASH \
+#        --billing-mode PAY_PER_REQUEST --region eu-west-2
+#
+# Deploy (one stack, both pipelines):
+#   aws cloudformation deploy \
+#     --template-file ci-cd/infra-backend-pipeline.yaml \
+#     --stack-name impulsoiq-backend-pipeline \
+#     --parameter-overrides GitHubOwner=<owner> GitHubRepo=impulsoiq \
+#     --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+#     --region eu-west-2
+#
+# Branch → environment mapping is carried by the ENV variable on each CodeBuild
+# project (dev|test|prod), which selects
+# infra-backend/environments/${ENV}/{backend.hcl,terraform.tfvars}.
+#
+# ─── Deploy stage ordering (deliberate) ────────────────────────────────────────
+#   1. AgentImageBuild  — creates any missing ECR repo, builds + pushes the 14
+#                         ARM64 agent images
+#   2. TerraformValidate
+#   3. TerraformPlan
+#   4. Manual approval
+#   5. TerraformApply
+#
+# Images are built FIRST because agentcore reads the repositories via
+# `data "aws_ecr_repository"`, which resolves at plan time, and because
+# AgentCore rejects an agent runtime whose image does not already exist.
+# buildspec-agents.yml owns those repositories; Terraform only reads them.
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: GitHub repository owner/username
+    Default: 'Tolu-Orina'
+
+  GitHubRepo:
+    Type: String
+    Description: GitHub repository name
+    Default: 'impulsoiq'
+
+  GitHubConnectionArn:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: SSM parameter holding the CodeConnections GitHub ARN
+    Default: /impulsoiq/cicd/codeconnections_arn
+
+Resources:
+
+  # ── Shared artifact bucket (both pipelines) ──────────────────────────────────
+  # No BucketName specified — AWS generates a unique lowercase name.
+  PipelineArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldArtifacts
+            Status: Enabled
+            ExpirationInDays: 30
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Purpose
+          Value: PipelineArtifacts
+
+  # ── IAM Role for CodePipeline (shared by both pipelines) ─────────────────────
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-pipeline-role'
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Purpose
+          Value: CodePipeline
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub '${PipelineArtifactsBucket.Arn}/*'
+                  - !GetAtt PipelineArtifactsBucket.Arn
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource:
+                  - !GetAtt TerraformValidateDevBuild.Arn
+                  - !GetAtt TerraformPlanDevBuild.Arn
+                  - !GetAtt TerraformDeployDevBuild.Arn
+                  - !GetAtt TerraformValidateTestBuild.Arn
+                  - !GetAtt TerraformPlanTestBuild.Arn
+                  - !GetAtt TerraformDeployTestBuild.Arn
+                  - !GetAtt TerraformValidateProdBuild.Arn
+                  - !GetAtt TerraformPlanProdBuild.Arn
+                  - !GetAtt TerraformDeployProdBuild.Arn
+                  - !GetAtt AgentImageBuildDev.Arn
+                  - !GetAtt AgentImageBuildTest.Arn
+                  - !GetAtt AgentImageBuildProd.Arn
+              - Effect: Allow
+                Action:
+                  - codestar-connections:UseConnection
+                  - codeconnections:UseConnection
+                Resource: !Ref GitHubConnectionArn
+
+  # ─── IAM Roles for CodeBuild — Terraform operations, split per environment ───
+  # Each role can only touch its own environment's Terraform state prefix, its
+  # own SSM namespace, and resources matching impulsoiq-*-<env>. Services whose
+  # Create* calls use AWS-generated opaque IDs (Bedrock/AgentCore, DSQL, Connect,
+  # Cognito, API Gateway, AppSync, KMS, CloudTrail) stay on Resource '*' —
+  # there is no name-based ARN to scope against at creation time.
+
+  CodeBuildTerraformRoleDev:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-codebuild-terraform-dev-role'
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Purpose
+          Value: TerraformBuildDev
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildTerraformDevPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PipelineArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - !Sub '${PipelineArtifactsBucket.Arn}/*'
+                  - !GetAtt PipelineArtifactsBucket.Arn
+              - Sid: TerraformStateObjectsDev
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: 'arn:aws:s3:::impulsoiq-tf-state/infra-backend/dev/*'
+              - Sid: TerraformStateBucketList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketVersioning
+                Resource: 'arn:aws:s3:::impulsoiq-tf-state'
+              - Sid: TerraformStateLock
+                Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/impulsoiq-tf-lock'
+              - Sid: DataBucketsDev
+                Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - 'arn:aws:s3:::impulsoiq-*-dev'
+                  - 'arn:aws:s3:::impulsoiq-*-dev/*'
+              - Sid: SsmParametersDev
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                  - ssm:DeleteParameter
+                  - ssm:DeleteParameters
+                  - ssm:AddTagsToResource
+                  - ssm:ListTagsForResource
+                  - ssm:RemoveTagsFromResource
+                Resource:
+                  - !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/impulsoiq/dev/*'
+                  - !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/impulsoiq/cicd/*'
+              # DescribeParameters is account-scoped (no resource ARN)
+              - Sid: SsmDescribeParameters
+                Effect: Allow
+                Action:
+                  - ssm:DescribeParameters
+                Resource: '*'
+              - Sid: LambdaDev
+                Effect: Allow
+                Action:
+                  - lambda:*
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:impulsoiq-*-dev'
+              # Event-source mappings are identified by an opaque UUID
+              - Sid: LambdaEventSourceMappings
+                Effect: Allow
+                Action:
+                  - lambda:CreateEventSourceMapping
+                  - lambda:DeleteEventSourceMapping
+                  - lambda:GetEventSourceMapping
+                  - lambda:UpdateEventSourceMapping
+                  - lambda:ListEventSourceMappings
+                Resource: '*'
+              - Sid: DynamoDbDev
+                Effect: Allow
+                Action:
+                  - dynamodb:*
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/impulsoiq-*-dev*'
+              - Sid: StepFunctionsDev
+                Effect: Allow
+                Action:
+                  - states:*
+                Resource: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:impulsoiq-*-dev'
+              - Sid: EventBridgeDev
+                Effect: Allow
+                Action:
+                  - events:*
+                Resource:
+                  - !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/impulsoiq-*-dev'
+                  - !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/impulsoiq-*-dev'
+              - Sid: SchedulerDev
+                Effect: Allow
+                Action:
+                  - scheduler:*
+                Resource: !Sub 'arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/impulsoiq-*-dev'
+              - Sid: SnsDev
+                Effect: Allow
+                Action:
+                  - sns:*
+                Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:impulsoiq-*-dev'
+              - Sid: EcrDev
+                Effect: Allow
+                Action:
+                  - ecr:*
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/impulsoiq-*-dev'
+              - Sid: EcrAuthToken
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: IamScopedDev
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:PassRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/impulsoiq-*-dev'
+              - Sid: IamPolicyScopedDev
+                Effect: Allow
+                Action:
+                  - iam:CreatePolicy
+                  - iam:DeletePolicy
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:ListPolicyVersions
+                  - iam:CreatePolicyVersion
+                  - iam:DeletePolicyVersion
+                  - iam:TagPolicy
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:policy/impulsoiq-*-dev'
+              - Sid: OpaqueIdServices
+                Effect: Allow
+                Action:
+                  - cognito-idp:*
+                  - apigateway:*
+                  - appsync:*
+                  - dsql:*
+                  - connect:*
+                  - cloudtrail:*
+                  - kms:*
+                  - secretsmanager:*
+                  - bedrock:*
+                  - bedrock-agentcore:*
+                  - cloudwatch:*
+                  - logs:DescribeLogGroups
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:TagResource
+                  - logs:ListTagsForResource
+                  - logs:DescribeMetricFilters
+                  - logs:PutMetricFilter
+                  - logs:DeleteMetricFilter
+                Resource: '*'
+              - Sid: CodeBuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+
+  CodeBuildTerraformRoleTest:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-codebuild-terraform-test-role'
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Purpose
+          Value: TerraformBuildTest
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildTerraformTestPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PipelineArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - !Sub '${PipelineArtifactsBucket.Arn}/*'
+                  - !GetAtt PipelineArtifactsBucket.Arn
+              - Sid: TerraformStateObjectsTest
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: 'arn:aws:s3:::impulsoiq-tf-state/infra-backend/test/*'
+              - Sid: TerraformStateBucketList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketVersioning
+                Resource: 'arn:aws:s3:::impulsoiq-tf-state'
+              - Sid: TerraformStateLock
+                Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/impulsoiq-tf-lock'
+              - Sid: DataBucketsTest
+                Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - 'arn:aws:s3:::impulsoiq-*-test'
+                  - 'arn:aws:s3:::impulsoiq-*-test/*'
+              - Sid: SsmParametersTest
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                  - ssm:DeleteParameter
+                  - ssm:DeleteParameters
+                  - ssm:AddTagsToResource
+                  - ssm:ListTagsForResource
+                  - ssm:RemoveTagsFromResource
+                Resource:
+                  - !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/impulsoiq/test/*'
+                  - !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/impulsoiq/cicd/*'
+              - Sid: SsmDescribeParameters
+                Effect: Allow
+                Action:
+                  - ssm:DescribeParameters
+                Resource: '*'
+              - Sid: LambdaTest
+                Effect: Allow
+                Action:
+                  - lambda:*
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:impulsoiq-*-test'
+              - Sid: LambdaEventSourceMappings
+                Effect: Allow
+                Action:
+                  - lambda:CreateEventSourceMapping
+                  - lambda:DeleteEventSourceMapping
+                  - lambda:GetEventSourceMapping
+                  - lambda:UpdateEventSourceMapping
+                  - lambda:ListEventSourceMappings
+                Resource: '*'
+              - Sid: DynamoDbTest
+                Effect: Allow
+                Action:
+                  - dynamodb:*
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/impulsoiq-*-test*'
+              - Sid: StepFunctionsTest
+                Effect: Allow
+                Action:
+                  - states:*
+                Resource: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:impulsoiq-*-test'
+              - Sid: EventBridgeTest
+                Effect: Allow
+                Action:
+                  - events:*
+                Resource:
+                  - !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/impulsoiq-*-test'
+                  - !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/impulsoiq-*-test'
+              - Sid: SchedulerTest
+                Effect: Allow
+                Action:
+                  - scheduler:*
+                Resource: !Sub 'arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/impulsoiq-*-test'
+              - Sid: SnsTest
+                Effect: Allow
+                Action:
+                  - sns:*
+                Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:impulsoiq-*-test'
+              - Sid: EcrTest
+                Effect: Allow
+                Action:
+                  - ecr:*
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/impulsoiq-*-test'
+              - Sid: EcrAuthToken
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: IamScopedTest
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:PassRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/impulsoiq-*-test'
+              - Sid: IamPolicyScopedTest
+                Effect: Allow
+                Action:
+                  - iam:CreatePolicy
+                  - iam:DeletePolicy
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:ListPolicyVersions
+                  - iam:CreatePolicyVersion
+                  - iam:DeletePolicyVersion
+                  - iam:TagPolicy
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:policy/impulsoiq-*-test'
+              - Sid: OpaqueIdServices
+                Effect: Allow
+                Action:
+                  - cognito-idp:*
+                  - apigateway:*
+                  - appsync:*
+                  - dsql:*
+                  - connect:*
+                  - cloudtrail:*
+                  - kms:*
+                  - secretsmanager:*
+                  - bedrock:*
+                  - bedrock-agentcore:*
+                  - cloudwatch:*
+                  - logs:DescribeLogGroups
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:TagResource
+                  - logs:ListTagsForResource
+                  - logs:DescribeMetricFilters
+                  - logs:PutMetricFilter
+                  - logs:DeleteMetricFilter
+                Resource: '*'
+              - Sid: CodeBuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+
+  CodeBuildTerraformRoleProd:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-codebuild-terraform-prod-role'
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Purpose
+          Value: TerraformBuildProd
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildTerraformProdPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PipelineArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - !Sub '${PipelineArtifactsBucket.Arn}/*'
+                  - !GetAtt PipelineArtifactsBucket.Arn
+              - Sid: TerraformStateObjectsProd
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: 'arn:aws:s3:::impulsoiq-tf-state/infra-backend/prod/*'
+              - Sid: TerraformStateBucketList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketVersioning
+                Resource: 'arn:aws:s3:::impulsoiq-tf-state'
+              - Sid: TerraformStateLock
+                Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/impulsoiq-tf-lock'
+              - Sid: DataBucketsProd
+                Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - 'arn:aws:s3:::impulsoiq-*-prod'
+                  - 'arn:aws:s3:::impulsoiq-*-prod/*'
+              - Sid: SsmParametersProd
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                  - ssm:DeleteParameter
+                  - ssm:DeleteParameters
+                  - ssm:AddTagsToResource
+                  - ssm:ListTagsForResource
+                  - ssm:RemoveTagsFromResource
+                Resource:
+                  - !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/impulsoiq/prod/*'
+                  - !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/impulsoiq/cicd/*'
+              - Sid: SsmDescribeParameters
+                Effect: Allow
+                Action:
+                  - ssm:DescribeParameters
+                Resource: '*'
+              - Sid: LambdaProd
+                Effect: Allow
+                Action:
+                  - lambda:*
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:impulsoiq-*-prod'
+              - Sid: LambdaEventSourceMappings
+                Effect: Allow
+                Action:
+                  - lambda:CreateEventSourceMapping
+                  - lambda:DeleteEventSourceMapping
+                  - lambda:GetEventSourceMapping
+                  - lambda:UpdateEventSourceMapping
+                  - lambda:ListEventSourceMappings
+                Resource: '*'
+              - Sid: DynamoDbProd
+                Effect: Allow
+                Action:
+                  - dynamodb:*
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/impulsoiq-*-prod*'
+              - Sid: StepFunctionsProd
+                Effect: Allow
+                Action:
+                  - states:*
+                Resource: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:impulsoiq-*-prod'
+              - Sid: EventBridgeProd
+                Effect: Allow
+                Action:
+                  - events:*
+                Resource:
+                  - !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/impulsoiq-*-prod'
+                  - !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/impulsoiq-*-prod'
+              - Sid: SchedulerProd
+                Effect: Allow
+                Action:
+                  - scheduler:*
+                Resource: !Sub 'arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/default/impulsoiq-*-prod'
+              - Sid: SnsProd
+                Effect: Allow
+                Action:
+                  - sns:*
+                Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:impulsoiq-*-prod'
+              - Sid: EcrProd
+                Effect: Allow
+                Action:
+                  - ecr:*
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/impulsoiq-*-prod'
+              - Sid: EcrAuthToken
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: IamScopedProd
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:PassRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/impulsoiq-*-prod'
+              - Sid: IamPolicyScopedProd
+                Effect: Allow
+                Action:
+                  - iam:CreatePolicy
+                  - iam:DeletePolicy
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:ListPolicyVersions
+                  - iam:CreatePolicyVersion
+                  - iam:DeletePolicyVersion
+                  - iam:TagPolicy
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:policy/impulsoiq-*-prod'
+              - Sid: OpaqueIdServices
+                Effect: Allow
+                Action:
+                  - cognito-idp:*
+                  - apigateway:*
+                  - appsync:*
+                  - dsql:*
+                  - connect:*
+                  - cloudtrail:*
+                  - kms:*
+                  - secretsmanager:*
+                  - bedrock:*
+                  - bedrock-agentcore:*
+                  - cloudwatch:*
+                  - logs:DescribeLogGroups
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:TagResource
+                  - logs:ListTagsForResource
+                  - logs:DescribeMetricFilters
+                  - logs:PutMetricFilter
+                  - logs:DeleteMetricFilter
+                Resource: '*'
+              - Sid: CodeBuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+
+  # ─── CodeBuild Projects — Dev ────────────────────────────────────────────────
+  # ARM_CONTAINER is required: Lambda functions build for arm64 and AgentCore
+  # Runtime containers must target aarch64.
+
+  TerraformValidateDevBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-validate-dev'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleDev.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-validate.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: dev
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 20
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: dev
+
+  TerraformPlanDevBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-plan-dev'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleDev.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-plan.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        EnvironmentVariables:
+          - Name: ENV
+            Value: dev
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 45
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: dev
+
+  TerraformDeployDevBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-deploy-dev'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleDev.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-apply.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        EnvironmentVariables:
+          - Name: ENV
+            Value: dev
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 60
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: dev
+
+  # ─── CodeBuild Projects — Test ───────────────────────────────────────────────
+
+  TerraformValidateTestBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-validate-test'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleTest.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-validate.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: test
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 20
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: test
+
+  TerraformPlanTestBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-plan-test'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleTest.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-plan.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        EnvironmentVariables:
+          - Name: ENV
+            Value: test
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 45
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: test
+
+  TerraformDeployTestBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-deploy-test'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleTest.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-apply.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        EnvironmentVariables:
+          - Name: ENV
+            Value: test
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 60
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: test
+
+  # ─── CodeBuild Projects — Prod ───────────────────────────────────────────────
+
+  TerraformValidateProdBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-validate-prod'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleProd.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-validate.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: prod
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 20
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: prod
+
+  TerraformPlanProdBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-plan-prod'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleProd.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-plan.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        EnvironmentVariables:
+          - Name: ENV
+            Value: prod
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 45
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: prod
+
+  TerraformDeployProdBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-deploy-prod'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleProd.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-apply.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        EnvironmentVariables:
+          - Name: ENV
+            Value: prod
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 60
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: prod
+
+  # ─── Agent container images (ARM64) ─────────────────────────────────────────
+  # Every aws_bedrockagentcore_agent_runtime points at <ecr>:latest, so these
+  # images must exist before Terraform can create the runtimes.
+  # PrivilegedMode is required for docker build inside CodeBuild.
+
+  AgentImageBuildDev:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-agent-images-dev'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleDev.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-agents.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_LARGE
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: ENV
+            Value: dev
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 60
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: dev
+
+  AgentImageBuildTest:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-agent-images-test'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleTest.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-agents.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_LARGE
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: ENV
+            Value: test
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 60
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: test
+
+  AgentImageBuildProd:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-agent-images-prod'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleProd.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-agents.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_LARGE
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: ENV
+            Value: prod
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 60
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: prod
+
+  # ─── Pipeline 1: Non-Prod (develop → dev → test) ─────────────────────────────
+  NonProdPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub '${AWS::StackName}-nonprod'
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      PipelineType: V2
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineArtifactsBucket
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: NonProd
+      Stages:
+        # Stage 1: Source — develop branch (CodePipeline requires Source-only stage)
+        - Name: Source
+          Actions:
+            - Name: SourceDev
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              OutputArtifacts:
+                - Name: SourceOutputDev
+              Configuration:
+                ConnectionArn: !Ref GitHubConnectionArn
+                FullRepositoryId: !Sub '${GitHubOwner}/${GitHubRepo}'
+                BranchName: develop
+                DetectChanges: true
+                OutputArtifactFormat: CODE_ZIP
+              RunOrder: 1
+
+        # Stage 2: Deploy Dev
+        - Name: DeployDev
+          Actions:
+            - Name: AgentImageBuildDev
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+              OutputArtifacts:
+                - Name: AgentImageOutputDev
+              Configuration:
+                ProjectName: !Ref AgentImageBuildDev
+              RunOrder: 1
+
+            - Name: TerraformValidateDev
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+              OutputArtifacts:
+                - Name: TerraformValidateOutputDev
+              Configuration:
+                ProjectName: !Ref TerraformValidateDevBuild
+              RunOrder: 2
+
+            - Name: TerraformPlanDev
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+              OutputArtifacts:
+                - Name: TerraformPlanOutputDev
+              Configuration:
+                ProjectName: !Ref TerraformPlanDevBuild
+                PrimarySource: SourceOutputDev
+              RunOrder: 3
+
+            - Name: ApproveDevDeploy
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                CustomData: |
+                  DEV ENVIRONMENT DEPLOYMENT APPROVAL
+
+                  Branch: develop
+                  Environment: dev
+
+                  Before approving, review the Terraform plan output in the
+                  "TerraformPlanDev" action's CodeBuild logs above (click
+                  "Details" on that action in this pipeline execution).
+
+                  Click "Approve" to apply the plan to the DEV environment.
+                  Click "Reject" to cancel this deployment.
+              RunOrder: 4
+
+            - Name: TerraformDeployDev
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+                - Name: TerraformPlanOutputDev
+              OutputArtifacts:
+                - Name: TerraformDeployOutputDev
+              Configuration:
+                ProjectName: !Ref TerraformDeployDevBuild
+                PrimarySource: SourceOutputDev
+              RunOrder: 5
+
+        # Stage 3: Deploy Test
+        - Name: DeployTest
+          Actions:
+            - Name: AgentImageBuildTest
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+              OutputArtifacts:
+                - Name: AgentImageOutputTest
+              Configuration:
+                ProjectName: !Ref AgentImageBuildTest
+              RunOrder: 1
+
+            - Name: TerraformValidateTest
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+              OutputArtifacts:
+                - Name: TerraformValidateOutputTest
+              Configuration:
+                ProjectName: !Ref TerraformValidateTestBuild
+              RunOrder: 2
+
+            - Name: TerraformPlanTest
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+              OutputArtifacts:
+                - Name: TerraformPlanOutputTest
+              Configuration:
+                ProjectName: !Ref TerraformPlanTestBuild
+                PrimarySource: SourceOutputDev
+              RunOrder: 3
+
+            - Name: ApproveTestDeploy
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                CustomData: |
+                  TEST ENVIRONMENT DEPLOYMENT APPROVAL
+
+                  Branch: develop
+                  Environment: test
+
+                  Dev deployment has completed. Before approving, review the
+                  Terraform plan output in the "TerraformPlanTest" action's
+                  CodeBuild logs above.
+
+                  Click "Approve" to proceed with Test deployment.
+                  Click "Reject" to skip Test deployment.
+              RunOrder: 4
+
+            - Name: TerraformDeployTest
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+                - Name: TerraformPlanOutputTest
+              OutputArtifacts:
+                - Name: TerraformDeployOutputTest
+              Configuration:
+                ProjectName: !Ref TerraformDeployTestBuild
+                PrimarySource: SourceOutputDev
+              RunOrder: 5
+
+  # ─── Pipeline 2: Prod (main → prod, double gate) ─────────────────────────────
+  ProdPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub '${AWS::StackName}-prod'
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      PipelineType: V2
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineArtifactsBucket
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: prod
+      Stages:
+        # Stage 1: Source — main branch
+        - Name: Source
+          Actions:
+            - Name: SourceProd
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              OutputArtifacts:
+                - Name: SourceOutputProd
+              Configuration:
+                ConnectionArn: !Ref GitHubConnectionArn
+                FullRepositoryId: !Sub '${GitHubOwner}/${GitHubRepo}'
+                BranchName: main
+                DetectChanges: true
+                OutputArtifactFormat: CODE_ZIP
+              RunOrder: 1
+
+        # Stage 2: Deploy Prod — double gate (release window, then apply)
+        - Name: DeployProd
+          Actions:
+            - Name: ApproveProdRelease
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                CustomData: |
+                  PRODUCTION DEPLOYMENT — FIRST GATE (RELEASE WINDOW)
+
+                  Branch: main
+                  Environment: prod
+
+                  This gate confirms the release window. Approving starts
+                  Terraform validate + plan against PRODUCTION.
+                  No infrastructure changes are applied at this gate.
+              RunOrder: 1
+
+            - Name: AgentImageBuildProd
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputProd
+              OutputArtifacts:
+                - Name: AgentImageOutputProd
+              Configuration:
+                ProjectName: !Ref AgentImageBuildProd
+              RunOrder: 2
+
+            - Name: TerraformValidateProd
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputProd
+              OutputArtifacts:
+                - Name: TerraformValidateOutputProd
+              Configuration:
+                ProjectName: !Ref TerraformValidateProdBuild
+              RunOrder: 3
+
+            - Name: TerraformPlanProd
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputProd
+              OutputArtifacts:
+                - Name: TerraformPlanOutputProd
+              Configuration:
+                ProjectName: !Ref TerraformPlanProdBuild
+                PrimarySource: SourceOutputProd
+              RunOrder: 4
+
+            - Name: ApproveProdApply
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                CustomData: |
+                  PRODUCTION DEPLOYMENT — SECOND GATE (APPLY)
+
+                  Branch: main
+                  Environment: prod
+
+                  Review the Terraform plan output in the "TerraformPlanProd"
+                  action's CodeBuild logs above before approving.
+
+                  Approving APPLIES infrastructure changes to PRODUCTION.
+              RunOrder: 5
+
+            - Name: TerraformDeployProd
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputProd
+                - Name: TerraformPlanOutputProd
+              OutputArtifacts:
+                - Name: TerraformDeployOutputProd
+              Configuration:
+                ProjectName: !Ref TerraformDeployProdBuild
+                PrimarySource: SourceOutputProd
+              RunOrder: 6
+
+Outputs:
+  NonProdPipelineName:
+    Description: Non-prod pipeline (develop → dev → test)
+    Value: !Ref NonProdPipeline
+
+  ProdPipelineName:
+    Description: Prod pipeline (main → prod, double gate)
+    Value: !Ref ProdPipeline
+
+  ArtifactsBucketName:
+    Description: Shared pipeline artifacts bucket
+    Value: !Ref PipelineArtifactsBucket

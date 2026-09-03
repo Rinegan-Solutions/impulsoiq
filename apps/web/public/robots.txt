@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+Disallow: /sign-in
+Disallow: /sign-up
+Disallow: /verify
+Disallow: /contacts
+Disallow: /campaigns
+Disallow: /control-panel
+
+Sitemap: https://impulsoiq.rinegansolutions.com/sitemap.xml

@@ -1,0 +1,44 @@
+version: 0.2
+# Builds the React SPA and publishes it to the environment's S3 origin,
+# then invalidates CloudFront.
+#
+# ENV is set by the CodeBuild project (dev|test|prod). Bucket and distribution
+# ID are read from SSM at build time — written there by infra-web's Terraform —
+# so no ID that Terraform owns is hardcoded in the pipeline template.
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+    commands:
+      - npm ci
+
+  pre_build:
+    commands:
+      - echo "Building web app for ENV=${ENV}"
+      - export WEB_BUCKET=$(aws ssm get-parameter --name "/impulsoiq/${ENV}/web/bucket" --query 'Parameter.Value' --output text)
+      - export CF_DISTRIBUTION_ID=$(aws ssm get-parameter --name "/impulsoiq/${ENV}/web/cloudfront_id" --query 'Parameter.Value' --output text)
+      # Backend discovery — injected into the Vite build as VITE_* vars.
+      # `|| true` keeps the build green before the backend stack exists.
+      - export VITE_API_URL=$(aws ssm get-parameter --name "/impulsoiq/${ENV}/backend/api_url" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+      - export VITE_COGNITO_USER_POOL_ID=$(aws ssm get-parameter --name "/impulsoiq/${ENV}/backend/cognito_user_pool_id" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+      - export VITE_COGNITO_CLIENT_ID=$(aws ssm get-parameter --name "/impulsoiq/${ENV}/backend/cognito_client_id" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+      - export VITE_APPSYNC_URL=$(aws ssm get-parameter --name "/impulsoiq/${ENV}/backend/appsync_url" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+      - export VITE_VOICE_WS_URL=$(aws ssm get-parameter --name "/impulsoiq/${ENV}/backend/voice_ws_url" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+      - echo "Target bucket=${WEB_BUCKET} distribution=${CF_DISTRIBUTION_ID}"
+
+  build:
+    commands:
+      - npm run build --workspace=apps/web
+
+  post_build:
+    commands:
+      - aws s3 sync apps/web/dist/ "s3://${WEB_BUCKET}/" --delete
+      # index.html must never be cached — it references hashed asset filenames
+      - aws s3 cp "s3://${WEB_BUCKET}/index.html" "s3://${WEB_BUCKET}/index.html" --metadata-directive REPLACE --cache-control "no-cache,no-store,must-revalidate" --content-type "text/html"
+      - aws cloudfront create-invalidation --distribution-id "${CF_DISTRIBUTION_ID}" --paths "/*"
+
+artifacts:
+  base-directory: apps/web/dist
+  files:
+    - '**/*'

@@ -1,0 +1,56 @@
+version: 0.2
+# Builds and pushes one ARM64 container image per agent to ECR.
+#
+# This MUST run before terraform apply on a first deploy: every
+# aws_bedrockagentcore_agent_runtime points at <ecr-url>:latest, and AgentCore
+# rejects a runtime whose image does not exist.
+#
+# ECR repositories themselves are created by Terraform, so on a truly empty
+# account the order is: terraform apply (creates repos, agent runtimes fail) →
+# this build → terraform apply again. After that first bootstrap the repos
+# persist and this stage runs ahead of apply normally.
+#
+# ENV is set by the calling CodeBuild project (dev|test|prod).
+# Requires an ARM_CONTAINER CodeBuild image with privileged mode enabled.
+
+env:
+  variables:
+    AWS_REGION: eu-west-2
+
+phases:
+  pre_build:
+    commands:
+      - echo "Building agent images for ENV=${ENV}"
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+  build:
+    commands:
+      - cd "$CODEBUILD_SRC_DIR/infra-backend/modules/agentcore"
+      - |
+        set -e
+        for dir in codes/*/; do
+          AGENT=$(basename "$dir")
+          REPO="impulsoiq-agent-${AGENT}-${ENV}"
+          IMAGE="${ECR_REGISTRY}/${REPO}:latest"
+          echo "── building ${AGENT} → ${IMAGE} ──"
+
+          # Terraform owns the repositories; create on demand so this stage can
+          # also run during first-deploy bootstrap before apply has succeeded.
+          aws ecr describe-repositories --repository-names "$REPO" --region "$AWS_REGION" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "$REPO" --region "$AWS_REGION" \
+                 --image-scanning-configuration scanOnPush=true >/dev/null
+
+          docker build \
+            --platform linux/arm64 \
+            -f runtime/Dockerfile \
+            --build-arg "AGENT_NAME=${AGENT}" \
+            -t "$IMAGE" \
+            .
+          docker push "$IMAGE"
+        done
+
+  post_build:
+    commands:
+      - echo "All agent images pushed for env=${ENV}"

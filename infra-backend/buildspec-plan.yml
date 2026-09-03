@@ -1,0 +1,26 @@
+version: 0.2
+# Runs terraform plan and outputs the plan file for the apply step.
+# ENV env var must be set by the calling CodeBuild project.
+phases:
+  install:
+    commands:
+      - yum install -y yum-utils
+      - yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
+      - yum install -y terraform nodejs-20
+  pre_build:
+    commands:
+      # Build Lambda bundles before Terraform plan
+      - |
+        for dir in $CODEBUILD_SRC_DIR/infra-backend/modules/lambda/codes/*/; do
+          [ -f "$dir/package.json" ] && cd "$dir" && npm ci && npm run build && cd $CODEBUILD_SRC_DIR
+        done
+  build:
+    commands:
+      - cd $CODEBUILD_SRC_DIR/infra-backend
+      - terraform init -backend-config="environments/${ENV}/backend.hcl"
+      - terraform plan -var-file="environments/${ENV}/terraform.tfvars" -out=tfplan
+      - echo "Plan complete for env=${ENV}"
+artifacts:
+  files:
+    - infra-backend/tfplan
+  discard-paths: no

@@ -1,0 +1,36 @@
+type AgentAction {
+  id: ID!
+  tenantId: String!
+  agentRunId: String!
+  agentType: String!
+  action: String!
+  status: String!
+  input: AWSJSON
+  output: AWSJSON
+  occurredAt: AWSDateTime!
+}
+
+type Mutation {
+  publishAgentAction(input: AgentActionInput!): AgentAction
+}
+
+input AgentActionInput {
+  id: ID!
+  tenantId: String!
+  agentRunId: String!
+  agentType: String!
+  action: String!
+  status: String!
+  input: AWSJSON
+  output: AWSJSON
+  occurredAt: AWSDateTime!
+}
+
+type Subscription {
+  onAgentAction(tenantId: String!): AgentAction
+  @aws_subscribe(mutations: ["publishAgentAction"])
+}
+
+type Query {
+  listRecentActions(tenantId: String!, limit: Int): [AgentAction]
+}

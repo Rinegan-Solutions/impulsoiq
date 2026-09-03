@@ -1,0 +1,22 @@
+{
+  "name": "appsync-publisher",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "esbuild handler.ts --bundle --platform=node --target=node20 --outfile=dist/handler.js && cd dist && zip -r ../dist.zip handler.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-appsync": "^3.0.0",
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/signature-v4": "^3.0.0",
+    "@aws-crypto/sha256-js": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.0",
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.4.0"
+  }
+}

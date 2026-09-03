@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+  html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; scroll-behavior: smooth; }
+  body { font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif; }
+  img, svg { display: block; max-width: 100%; }
+}
+
+@layer utilities {
+  .font-mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .gradient-text {
+    background: linear-gradient(125deg, #6366f1 0%, #8b5cf6 50%, #6366f1 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .gradient-text-light {
+    background: linear-gradient(125deg, #818cf8 0%, #a78bfa 50%, #818cf8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .scrollbar-hide { scrollbar-width: none; -ms-overflow-style: none; }
+  .scrollbar-hide::-webkit-scrollbar { display: none; }
+}

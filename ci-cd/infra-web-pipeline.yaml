@@ -1,0 +1,1151 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ImpulsoIQ Web Infra CI/CD Pipeline - CodePipeline with GitHub, CodeBuild for Terraform + Vite build (dev + test + prod)'
+
+# Deploy (one stack, both pipelines):
+#   aws cloudformation deploy \
+#     --template-file ci-cd/infra-web-pipeline.yaml \
+#     --stack-name impulsoiq-web-pipeline \
+#     --parameter-overrides GitHubOwner=<owner> GitHubRepo=impulsoiq \
+#     --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+#     --region eu-west-2
+#
+# Branch → environment mapping is carried by the ENV variable on each CodeBuild
+# project (dev|test|prod), which selects
+# infra-web/environments/${ENV}/{backend.hcl,terraform.tfvars}.
+#
+# infra-web's Terraform config never creates Lambda/Cognito/API GW/DynamoDB
+# resources — those grants from the backend template are deliberately omitted.
+# CloudFront/Route53/ACM stay on Resource '*' because those services use
+# AWS-generated opaque IDs (no name-based ARN for Create*).
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: GitHub repository owner/username
+    Default: 'Tolu-Orina'
+
+  GitHubRepo:
+    Type: String
+    Description: GitHub repository name
+    Default: 'impulsoiq'
+
+  GitHubConnectionArn:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: SSM parameter holding the CodeConnections GitHub ARN
+    Default: /impulsoiq/cicd/codeconnections_arn
+
+Resources:
+
+  # ── Shared artifact bucket (both pipelines) ──────────────────────────────────
+  PipelineArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldArtifacts
+            Status: Enabled
+            ExpirationInDays: 30
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Purpose
+          Value: PipelineArtifacts
+
+  # ── IAM Role for CodePipeline (shared by both pipelines) ─────────────────────
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-pipeline-role'
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Purpose
+          Value: CodePipeline
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub '${PipelineArtifactsBucket.Arn}/*'
+                  - !GetAtt PipelineArtifactsBucket.Arn
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource:
+                  - !GetAtt UnitTestBuild.Arn
+                  - !GetAtt TerraformValidateDevBuild.Arn
+                  - !GetAtt TerraformPlanDevBuild.Arn
+                  - !GetAtt TerraformDeployDevBuild.Arn
+                  - !GetAtt WebAppBuildDev.Arn
+                  - !GetAtt TerraformValidateTestBuild.Arn
+                  - !GetAtt TerraformPlanTestBuild.Arn
+                  - !GetAtt TerraformDeployTestBuild.Arn
+                  - !GetAtt WebAppBuildTest.Arn
+                  - !GetAtt TerraformValidateProdBuild.Arn
+                  - !GetAtt TerraformPlanProdBuild.Arn
+                  - !GetAtt TerraformDeployProdBuild.Arn
+                  - !GetAtt WebAppBuildProd.Arn
+              - Effect: Allow
+                Action:
+                  - codestar-connections:UseConnection
+                  - codeconnections:UseConnection
+                Resource: !Ref GitHubConnectionArn
+
+  # ── IAM Role for unit tests ──────────────────────────────────────────────────
+  # apps/web/buildspec-test.yml makes no AWS API calls — needs nothing beyond
+  # the shared artifact bucket and CloudWatch Logs.
+  CodeBuildUnitTestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-codebuild-unit-test-role'
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Purpose
+          Value: UnitTestBuild
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildUnitTestPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - !Sub '${PipelineArtifactsBucket.Arn}/*'
+                  - !GetAtt PipelineArtifactsBucket.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+
+  # ─── IAM Roles for CodeBuild — Terraform + web deploy, split per environment ─
+
+  CodeBuildTerraformRoleDev:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-codebuild-terraform-dev-role'
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Purpose
+          Value: TerraformBuildDev
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildTerraformDevPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PipelineArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - !Sub '${PipelineArtifactsBucket.Arn}/*'
+                  - !GetAtt PipelineArtifactsBucket.Arn
+              - Sid: WebAndLogBucketsDev
+                Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - 'arn:aws:s3:::impulsoiq-web-dev'
+                  - 'arn:aws:s3:::impulsoiq-web-dev/*'
+                  - 'arn:aws:s3:::impulsoiq-logs-dev'
+                  - 'arn:aws:s3:::impulsoiq-logs-dev/*'
+              - Sid: TerraformStateObjectsDev
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: 'arn:aws:s3:::impulsoiq-tf-state/infra-web/dev/*'
+              - Sid: TerraformStateBucketList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketVersioning
+                Resource: 'arn:aws:s3:::impulsoiq-tf-state'
+              - Sid: TerraformStateLock
+                Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/impulsoiq-tf-lock'
+              - Effect: Allow
+                Action:
+                  - cloudfront:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - route53:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - acm:*
+                Resource: '*'
+              - Sid: SsmParametersDev
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                  - ssm:DeleteParameter
+                  - ssm:DeleteParameters
+                  - ssm:AddTagsToResource
+                  - ssm:ListTagsForResource
+                  - ssm:RemoveTagsFromResource
+                Resource:
+                  - !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/impulsoiq/dev/web/*'
+                  - !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/impulsoiq/dev/backend/*'
+              # DescribeParameters is account-scoped (no resource ARN)
+              - Sid: SsmDescribeParametersDev
+                Effect: Allow
+                Action:
+                  - ssm:DescribeParameters
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+
+  CodeBuildTerraformRoleTest:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-codebuild-terraform-test-role'
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Purpose
+          Value: TerraformBuildTest
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildTerraformTestPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PipelineArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - !Sub '${PipelineArtifactsBucket.Arn}/*'
+                  - !GetAtt PipelineArtifactsBucket.Arn
+              - Sid: WebAndLogBucketsTest
+                Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - 'arn:aws:s3:::impulsoiq-web-test'
+                  - 'arn:aws:s3:::impulsoiq-web-test/*'
+                  - 'arn:aws:s3:::impulsoiq-logs-test'
+                  - 'arn:aws:s3:::impulsoiq-logs-test/*'
+              - Sid: TerraformStateObjectsTest
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: 'arn:aws:s3:::impulsoiq-tf-state/infra-web/test/*'
+              - Sid: TerraformStateBucketList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketVersioning
+                Resource: 'arn:aws:s3:::impulsoiq-tf-state'
+              - Sid: TerraformStateLock
+                Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/impulsoiq-tf-lock'
+              - Effect: Allow
+                Action:
+                  - cloudfront:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - route53:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - acm:*
+                Resource: '*'
+              - Sid: SsmParametersTest
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                  - ssm:DeleteParameter
+                  - ssm:DeleteParameters
+                  - ssm:AddTagsToResource
+                  - ssm:ListTagsForResource
+                  - ssm:RemoveTagsFromResource
+                Resource:
+                  - !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/impulsoiq/test/web/*'
+                  - !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/impulsoiq/test/backend/*'
+              - Sid: SsmDescribeParametersTest
+                Effect: Allow
+                Action:
+                  - ssm:DescribeParameters
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+
+  CodeBuildTerraformRoleProd:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-codebuild-terraform-prod-role'
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Purpose
+          Value: TerraformBuildProd
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildTerraformProdPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PipelineArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - !Sub '${PipelineArtifactsBucket.Arn}/*'
+                  - !GetAtt PipelineArtifactsBucket.Arn
+              - Sid: WebAndLogBucketsProd
+                Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - 'arn:aws:s3:::impulsoiq-web-prod'
+                  - 'arn:aws:s3:::impulsoiq-web-prod/*'
+                  - 'arn:aws:s3:::impulsoiq-logs-prod'
+                  - 'arn:aws:s3:::impulsoiq-logs-prod/*'
+              - Sid: TerraformStateObjectsProd
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: 'arn:aws:s3:::impulsoiq-tf-state/infra-web/prod/*'
+              - Sid: TerraformStateBucketList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketVersioning
+                Resource: 'arn:aws:s3:::impulsoiq-tf-state'
+              - Sid: TerraformStateLock
+                Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/impulsoiq-tf-lock'
+              - Effect: Allow
+                Action:
+                  - cloudfront:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - route53:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - acm:*
+                Resource: '*'
+              - Sid: SsmParametersProd
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                  - ssm:DeleteParameter
+                  - ssm:DeleteParameters
+                  - ssm:AddTagsToResource
+                  - ssm:ListTagsForResource
+                  - ssm:RemoveTagsFromResource
+                Resource:
+                  - !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/impulsoiq/prod/web/*'
+                  - !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/impulsoiq/prod/backend/*'
+              - Sid: SsmDescribeParametersProd
+                Effect: Allow
+                Action:
+                  - ssm:DescribeParameters
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+
+  # ─── CodeBuild Projects — Tests ──────────────────────────────────────────────
+
+  UnitTestBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-unit-test'
+      ServiceRole: !GetAtt CodeBuildUnitTestRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: apps/web/buildspec-test.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ComputeType: BUILD_GENERAL1_SMALL
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 20
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Purpose
+          Value: UnitTest
+
+  # ─── CodeBuild Projects — Dev ────────────────────────────────────────────────
+
+  TerraformValidateDevBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-validate-dev'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleDev.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-web/buildspec-validate.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: dev
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 15
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: dev
+
+  TerraformPlanDevBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-plan-dev'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleDev.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-web/buildspec-plan.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: dev
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: dev
+
+  TerraformDeployDevBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-deploy-dev'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleDev.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-web/buildspec-apply.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: dev
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 45
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: dev
+
+  WebAppBuildDev:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-webapp-dev'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleDev.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: apps/web/buildspec.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: dev
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: dev
+
+  # ─── CodeBuild Projects — Test ───────────────────────────────────────────────
+
+  TerraformValidateTestBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-validate-test'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleTest.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-web/buildspec-validate.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: test
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 15
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: test
+
+  TerraformPlanTestBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-plan-test'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleTest.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-web/buildspec-plan.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: test
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: test
+
+  TerraformDeployTestBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-deploy-test'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleTest.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-web/buildspec-apply.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: test
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 45
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: test
+
+  WebAppBuildTest:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-webapp-test'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleTest.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: apps/web/buildspec.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: test
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: test
+
+  # ─── CodeBuild Projects — Prod ───────────────────────────────────────────────
+
+  TerraformValidateProdBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-validate-prod'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleProd.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-web/buildspec-validate.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: prod
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 15
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: prod
+
+  TerraformPlanProdBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-plan-prod'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleProd.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-web/buildspec-plan.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: prod
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: prod
+
+  TerraformDeployProdBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-tf-deploy-prod'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleProd.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-web/buildspec-apply.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: prod
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 45
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: prod
+
+  WebAppBuildProd:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-webapp-prod'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleProd.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: apps/web/buildspec.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: prod
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: prod
+
+  # ─── Pipeline 1: Non-Prod (develop → unit test → dev → test) ─────────────────
+  NonProdPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub '${AWS::StackName}-nonprod'
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      PipelineType: V2
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineArtifactsBucket
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: NonProd
+      Stages:
+        # Stage 1: Source — develop branch
+        - Name: Source
+          Actions:
+            - Name: SourceDev
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              OutputArtifacts:
+                - Name: SourceOutputDev
+              Configuration:
+                ConnectionArn: !Ref GitHubConnectionArn
+                FullRepositoryId: !Sub '${GitHubOwner}/${GitHubRepo}'
+                BranchName: develop
+                DetectChanges: true
+                OutputArtifactFormat: CODE_ZIP
+              RunOrder: 1
+
+        # Stage 2: Unit tests — typecheck + lint + build the React app
+        - Name: Test
+          Actions:
+            - Name: UnitTest
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+              OutputArtifacts:
+                - Name: UnitTestOutput
+              Configuration:
+                ProjectName: !Ref UnitTestBuild
+              RunOrder: 1
+
+        # Stage 3: Deploy Dev
+        - Name: DeployDev
+          Actions:
+            - Name: TerraformValidateDev
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+              OutputArtifacts:
+                - Name: TerraformValidateOutputDev
+              Configuration:
+                ProjectName: !Ref TerraformValidateDevBuild
+              RunOrder: 1
+
+            - Name: TerraformPlanDev
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+              OutputArtifacts:
+                - Name: TerraformPlanOutputDev
+              Configuration:
+                ProjectName: !Ref TerraformPlanDevBuild
+                PrimarySource: SourceOutputDev
+              RunOrder: 2
+
+            - Name: ApproveDevDeploy
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                CustomData: |
+                  DEV ENVIRONMENT DEPLOYMENT APPROVAL
+
+                  Branch: develop
+                  Environment: dev
+
+                  Unit tests have passed. Before approving, review the
+                  Terraform plan output in the "TerraformPlanDev" action's
+                  CodeBuild logs above.
+
+                  Click "Approve" to apply the plan to the DEV environment.
+              RunOrder: 3
+
+            - Name: TerraformDeployDev
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+                - Name: TerraformPlanOutputDev
+              OutputArtifacts:
+                - Name: TerraformDeployOutputDev
+              Configuration:
+                ProjectName: !Ref TerraformDeployDevBuild
+                PrimarySource: SourceOutputDev
+              RunOrder: 4
+
+            - Name: WebAppBuildDev
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+                - Name: TerraformDeployOutputDev
+              OutputArtifacts:
+                - Name: WebAppBuildOutputDev
+              Configuration:
+                ProjectName: !Ref WebAppBuildDev
+                PrimarySource: SourceOutputDev
+              RunOrder: 5
+
+        # Stage 4: Deploy Test
+        - Name: DeployTest
+          Actions:
+            - Name: TerraformValidateTest
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+              OutputArtifacts:
+                - Name: TerraformValidateOutputTest
+              Configuration:
+                ProjectName: !Ref TerraformValidateTestBuild
+              RunOrder: 1
+
+            - Name: TerraformPlanTest
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+              OutputArtifacts:
+                - Name: TerraformPlanOutputTest
+              Configuration:
+                ProjectName: !Ref TerraformPlanTestBuild
+                PrimarySource: SourceOutputDev
+              RunOrder: 2
+
+            - Name: ApproveTestDeploy
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                CustomData: |
+                  TEST ENVIRONMENT DEPLOYMENT APPROVAL
+
+                  Branch: develop
+                  Environment: test
+
+                  Dev deployment has completed. Before approving, review the
+                  Terraform plan output in the "TerraformPlanTest" action's
+                  CodeBuild logs above.
+
+                  Click "Approve" to proceed with Test deployment.
+              RunOrder: 3
+
+            - Name: TerraformDeployTest
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+                - Name: TerraformPlanOutputTest
+              OutputArtifacts:
+                - Name: TerraformDeployOutputTest
+              Configuration:
+                ProjectName: !Ref TerraformDeployTestBuild
+                PrimarySource: SourceOutputDev
+              RunOrder: 4
+
+            - Name: WebAppBuildTest
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+                - Name: TerraformDeployOutputTest
+              OutputArtifacts:
+                - Name: WebAppBuildOutputTest
+              Configuration:
+                ProjectName: !Ref WebAppBuildTest
+                PrimarySource: SourceOutputDev
+              RunOrder: 5
+
+  # ─── Pipeline 2: Prod (main → prod, double gate) ─────────────────────────────
+  ProdPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub '${AWS::StackName}-prod'
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      PipelineType: V2
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineArtifactsBucket
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: prod
+      Stages:
+        # Stage 1: Source — main branch
+        - Name: Source
+          Actions:
+            - Name: SourceProd
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              OutputArtifacts:
+                - Name: SourceOutputProd
+              Configuration:
+                ConnectionArn: !Ref GitHubConnectionArn
+                FullRepositoryId: !Sub '${GitHubOwner}/${GitHubRepo}'
+                BranchName: main
+                DetectChanges: true
+                OutputArtifactFormat: CODE_ZIP
+              RunOrder: 1
+
+        # Stage 2: Deploy Prod — double gate
+        - Name: DeployProd
+          Actions:
+            - Name: ApproveProdRelease
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                CustomData: |
+                  PRODUCTION DEPLOYMENT — FIRST GATE (RELEASE WINDOW)
+
+                  Branch: main
+                  Environment: prod
+
+                  This gate confirms the release window. Approving starts
+                  Terraform validate + plan against PRODUCTION.
+                  No infrastructure changes are applied at this gate.
+              RunOrder: 1
+
+            - Name: TerraformValidateProd
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputProd
+              OutputArtifacts:
+                - Name: TerraformValidateOutputProd
+              Configuration:
+                ProjectName: !Ref TerraformValidateProdBuild
+              RunOrder: 2
+
+            - Name: TerraformPlanProd
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputProd
+              OutputArtifacts:
+                - Name: TerraformPlanOutputProd
+              Configuration:
+                ProjectName: !Ref TerraformPlanProdBuild
+                PrimarySource: SourceOutputProd
+              RunOrder: 3
+
+            - Name: ApproveProdApply
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                CustomData: |
+                  PRODUCTION DEPLOYMENT — SECOND GATE (APPLY)
+
+                  Branch: main
+                  Environment: prod
+
+                  Review the Terraform plan output in the "TerraformPlanProd"
+                  action's CodeBuild logs above before approving.
+
+                  Approving APPLIES infrastructure changes to PRODUCTION and
+                  publishes the web app to the production CloudFront origin.
+              RunOrder: 4
+
+            - Name: TerraformDeployProd
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputProd
+                - Name: TerraformPlanOutputProd
+              OutputArtifacts:
+                - Name: TerraformDeployOutputProd
+              Configuration:
+                ProjectName: !Ref TerraformDeployProdBuild
+                PrimarySource: SourceOutputProd
+              RunOrder: 5
+
+            - Name: WebAppBuildProd
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputProd
+                - Name: TerraformDeployOutputProd
+              OutputArtifacts:
+                - Name: WebAppBuildOutputProd
+              Configuration:
+                ProjectName: !Ref WebAppBuildProd
+                PrimarySource: SourceOutputProd
+              RunOrder: 6
+
+Outputs:
+  NonProdPipelineName:
+    Description: Non-prod pipeline (develop → unit test → dev → test)
+    Value: !Ref NonProdPipeline
+
+  ProdPipelineName:
+    Description: Prod pipeline (main → prod, double gate)
+    Value: !Ref ProdPipeline
+
+  ArtifactsBucketName:
+    Description: Shared pipeline artifacts bucket
+    Value: !Ref PipelineArtifactsBucket

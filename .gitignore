@@ -1,0 +1,39 @@
+# ── Dependencies ──────────────────────────────────────────────────────────────
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# ── Build output ──────────────────────────────────────────────────────────────
+dist/
+build/
+out/
+.next/
+# Lambda bundles — produced by the buildspecs, never committed
+dist.zip
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+*.local
+.env
+.env.*
+!.env.example
+
+# ── Terraform ─────────────────────────────────────────────────────────────────
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+*.tfplan
+tfplan
+terraform-outputs.json
+
+# Ignore stray root-level tfvars (may hold secrets), but the per-environment
+# config under environments/ is committed configuration, not secrets — the
+# buildspecs load it via -var-file and CI fails without it.
+*.tfvars
+!*.tfvars.example
+!**/environments/*/terraform.tfvars
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+.DS_Store

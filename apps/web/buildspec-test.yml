@@ -1,0 +1,27 @@
+version: 0.2
+# Unit test / static-analysis stage. Makes NO AWS API calls — the CodeBuild
+# role backing this project has no service permissions beyond artifacts + logs.
+#
+# Gate order is deliberate: typecheck first (fastest signal on a broken
+# refactor), then lint, then a full production build to catch anything that
+# only surfaces at bundle time.
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+    commands:
+      - npm ci
+
+  build:
+    commands:
+      - echo "── Typecheck ──"
+      - npm run typecheck
+      - echo "── Lint ──"
+      - npm run lint --workspace=apps/web
+      - echo "── Production build ──"
+      - npm run build --workspace=apps/web
+
+  post_build:
+    commands:
+      - echo "All static checks passed"

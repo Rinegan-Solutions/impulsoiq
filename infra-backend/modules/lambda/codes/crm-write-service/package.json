@@ -1,0 +1,23 @@
+{
+  "name": "crm-write-service",
+  "private": true,
+  "scripts": {
+    "build": "esbuild handler.ts --bundle --platform=node --target=node20 --outfile=dist/handler.js && cd dist && zip -r ../dist.zip .",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.143",
+    "@types/node": "^20.0.0",
+    "@types/pg": "^8.11.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/client-dsql": "^3.0.0",
+    "@aws-sdk/dsql-signer": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/signature-v4": "^3.0.0",
+    "pg": "^8.12.0"
+  }
+}

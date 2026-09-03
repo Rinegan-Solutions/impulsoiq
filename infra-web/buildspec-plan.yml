@@ -1,0 +1,16 @@
+version: 0.2
+phases:
+  install:
+    commands:
+      - yum install -y yum-utils
+      - yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
+      - yum install -y terraform
+  build:
+    commands:
+      - cd $CODEBUILD_SRC_DIR/infra-web
+      - terraform init -backend-config="environments/${ENV}/backend.hcl"
+      - terraform plan -var-file="environments/${ENV}/terraform.tfvars" -out=tfplan
+artifacts:
+  files:
+    - infra-web/tfplan
+  discard-paths: no

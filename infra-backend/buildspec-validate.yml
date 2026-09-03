@@ -1,0 +1,34 @@
+version: 0.2
+# Runs terraform validate. ENV is set by the calling CodeBuild project.
+#
+# Lambda bundles MUST be built before validate: aws_lambda_function uses
+# filebase64sha256() on dist.zip, and Terraform evaluates that during
+# validate — not just plan. A missing dist.zip fails validate outright.
+
+phases:
+  install:
+    commands:
+      - yum install -y yum-utils zip
+      - yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
+      - yum install -y terraform
+      - n 20 || true
+      - node --version
+
+  pre_build:
+    commands:
+      - echo "Validating environment=${ENV}"
+      # Build every Lambda bundle so filebase64sha256() can resolve
+      - |
+        for dir in "$CODEBUILD_SRC_DIR"/infra-backend/modules/lambda/codes/*/; do
+          if [ -f "$dir/package.json" ]; then
+            echo "── building $(basename "$dir") ──"
+            ( cd "$dir" && npm ci --omit=dev --no-audit --no-fund && npm run build )
+          fi
+        done
+
+  build:
+    commands:
+      - cd "$CODEBUILD_SRC_DIR/infra-backend"
+      - terraform init -backend-config="environments/${ENV}/backend.hcl"
+      - terraform validate
+      - echo "Validate succeeded for env=${ENV}"
