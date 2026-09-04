@@ -244,6 +244,15 @@ Resources:
                   - lambda:GetEventSourceMapping
                   - lambda:UpdateEventSourceMapping
                   - lambda:ListEventSourceMappings
+                  # Terraform reads tags back after every create. An event source
+                  # mapping's ARN is arn:aws:lambda:...:event-source-mapping:<uuid>,
+                  # which the function:impulsoiq-*-<env> scope above does not match,
+                  # so these belong here on '*' rather than with the function grants.
+                  # Without ListTags the mapping IS created and then the apply fails
+                  # reading it back -- leaving real drift between AWS and state.
+                  - lambda:ListTags
+                  - lambda:TagResource
+                  - lambda:UntagResource
                 Resource: '*'
               - Sid: DynamoDbDev
                 Effect: Allow
@@ -479,6 +488,15 @@ Resources:
                   - lambda:GetEventSourceMapping
                   - lambda:UpdateEventSourceMapping
                   - lambda:ListEventSourceMappings
+                  # Terraform reads tags back after every create. An event source
+                  # mapping's ARN is arn:aws:lambda:...:event-source-mapping:<uuid>,
+                  # which the function:impulsoiq-*-<env> scope above does not match,
+                  # so these belong here on '*' rather than with the function grants.
+                  # Without ListTags the mapping IS created and then the apply fails
+                  # reading it back -- leaving real drift between AWS and state.
+                  - lambda:ListTags
+                  - lambda:TagResource
+                  - lambda:UntagResource
                 Resource: '*'
               - Sid: DynamoDbTest
                 Effect: Allow
@@ -714,6 +732,15 @@ Resources:
                   - lambda:GetEventSourceMapping
                   - lambda:UpdateEventSourceMapping
                   - lambda:ListEventSourceMappings
+                  # Terraform reads tags back after every create. An event source
+                  # mapping's ARN is arn:aws:lambda:...:event-source-mapping:<uuid>,
+                  # which the function:impulsoiq-*-<env> scope above does not match,
+                  # so these belong here on '*' rather than with the function grants.
+                  # Without ListTags the mapping IS created and then the apply fails
+                  # reading it back -- leaving real drift between AWS and state.
+                  - lambda:ListTags
+                  - lambda:TagResource
+                  - lambda:UntagResource
                 Resource: '*'
               - Sid: DynamoDbProd
                 Effect: Allow

@@ -1,12 +1,75 @@
 version: 0.2
+# Applies the plan produced by buildspec-plan.yml.
+# ENV is set by the calling CodeBuild project.
+#
+# LOCATING THE PLAN
+# CodePipeline gives this action two input artifacts. The primary
+# (SourceOutput*) lands in $CODEBUILD_SRC_DIR; every secondary artifact lands in
+# its own $CODEBUILD_SRC_DIR_<ArtifactName> directory. So tfplan is NOT beside
+# the Terraform config -- it must be copied in first. Rather than hardcode
+# TerraformPlanOutputDev/Test/Prod, the plan is located by search, which keeps
+# this buildspec identical across all three environments.
+#
+# Careful: "$CODEBUILD_SRC_DIR_*" is NOT variable expansion -- the shell reads
+# it as the unset variable $CODEBUILD_SRC_DIR_ followed by a glob, and silently
+# expands to the working directory's entries. Enumerate through env instead.
+
 phases:
   install:
     commands:
       - yum install -y yum-utils
       - yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
       - yum install -y terraform
+      - terraform version
+
+  pre_build:
+    commands:
+      - |
+        set -e
+        echo "Locating tfplan from the plan stage's artifact..."
+
+        PLAN=""
+        for d in $(env | sed -n 's/^CODEBUILD_SRC_DIR_[A-Za-z0-9_]*=//p'); do
+          if [ -f "$d/infra-web/tfplan" ]; then PLAN="$d/infra-web/tfplan"; break; fi
+          if [ -f "$d/tfplan" ];           then PLAN="$d/tfplan";           break; fi
+        done
+
+        # Fallback: scan the whole artifact tree. Depth varies
+        # (/codebuild/output/src<N>/src/s3/01), so no fixed glob is reliable.
+        if [ -z "$PLAN" ]; then
+          PLAN=$(find /codebuild/output -type f -name tfplan 2>/dev/null | head -1)
+        fi
+
+        if [ -z "$PLAN" ]; then
+          echo "ERROR: tfplan not found in any input artifact."
+          echo "Secondary artifact dirs:"
+          env | grep '^CODEBUILD_SRC_DIR' || echo "  (none)"
+          echo "Tree:"
+          find /codebuild/output -maxdepth 5 -type d 2>/dev/null | head -40
+          exit 1
+        fi
+
+        echo "Found plan: $PLAN"
+        cp "$PLAN" "$CODEBUILD_SRC_DIR/infra-web/tfplan"
+
   build:
     commands:
-      - cd $CODEBUILD_SRC_DIR/infra-web
+      - cd "$CODEBUILD_SRC_DIR/infra-web"
+      # A saved plan is only valid against the provider versions that produced
+      # it, which is why .terraform.lock.hcl is committed -- plan and apply then
+      # resolve to identical versions. The lock must carry hashes for
+      # linux_amd64: these web projects run on LINUX_CONTAINER (x86_64), unlike
+      # the backend's ARM_CONTAINER.
       - terraform init -backend-config="environments/${ENV}/backend.hcl"
-      - terraform apply tfplan
+      - terraform apply -auto-approve tfplan
+
+  post_build:
+    commands:
+      # post_build runs even when build FAILED, so branch on
+      # CODEBUILD_BUILD_SUCCEEDING rather than reporting success unconditionally.
+      - |
+        if [ "$CODEBUILD_BUILD_SUCCEEDING" = "1" ]; then
+          echo "Apply complete for env=${ENV}"
+        else
+          echo "Apply FAILED for env=${ENV}"
+        fi

@@ -120,10 +120,39 @@ resource "aws_iam_role_policy" "agentcore_runtime" {
         Resource = "*"
       },
       {
-        Sid      = "KmsUse"
-        Effect   = "Allow"
-        Action   = ["kms:Decrypt", "kms:GenerateDataKey"]
+        Sid    = "KmsUse"
+        Effect = "Allow"
+        # AgentCore assumes this role under its own session names (e.g.
+        # GenesisMCPTargetTargetEncryption) to encrypt gateway state, so the
+        # full envelope-encryption set is needed, not just Decrypt.
+        Action = [
+          "kms:Decrypt", "kms:GenerateDataKey", "kms:Encrypt",
+          "kms:DescribeKey", "kms:ReEncryptFrom", "kms:ReEncryptTo",
+          "kms:CreateGrant",
+        ]
         Resource = aws_kms_key.agentcore.arn
+      },
+      {
+        # AgentCore Runtime pulls each agent's container image itself, using
+        # THIS role. Without these, CreateAgentRuntime fails validation up front
+        # with "Access denied while validating ECR URI" -- the image exists and
+        # the URI is correct; the runtime simply cannot read it.
+        Sid    = "EcrPullAgentImages"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchCheckLayerAvailability", "ecr:DescribeImages",
+          "ecr:DescribeRepositories",
+        ]
+        Resource = [for r in data.aws_ecr_repository.agent : r.arn]
+      },
+      {
+        # ecr:GetAuthorizationToken is account-level and admits no resource
+        # scope -- it returns a token, not repository data.
+        Sid      = "EcrAuthToken"
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
       }
     ]
   })
@@ -162,6 +191,14 @@ resource "aws_bedrockagentcore_memory" "main" {
 # ── AgentCore Runtime (one per agent, ARM64) ──────────────────────────────────
 resource "aws_bedrockagentcore_agent_runtime" "agent" {
   for_each = local.agents
+
+  # Both this and the gateway reference the role's ARN, which exists the moment
+  # the ROLE does -- so Terraform sees no reason to wait for the inline policy.
+  # AgentCore validates the role's permissions during Create, so without this
+  # the create can race the policy write and fail on permissions that the
+  # finished config does grant. That failure looks exactly like a missing
+  # permission, which sends you hunting for a grant that is already there.
+  depends_on = [aws_iam_role_policy.agentcore_runtime]
 
   agent_runtime_name = replace("${var.project}_${each.key}_${var.env}", "-", "_")
   description        = each.value.description
@@ -229,6 +266,10 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
 
 # ── AgentCore Gateway (MCP endpoint — the tool surface agents call) ───────────
 resource "aws_bedrockagentcore_gateway" "main" {
+  # See the note on agent_runtime above: CreateGateway encrypts with the KMS key
+  # using this role, so the inline policy must be in place first.
+  depends_on = [aws_iam_role_policy.agentcore_runtime]
+
   name            = "${var.project}-gateway-${var.env}"
   description     = "MCP tool endpoint — exposes CRM Write Service and domain tools"
   role_arn        = aws_iam_role.agentcore_runtime.arn
