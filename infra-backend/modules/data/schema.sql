@@ -5,9 +5,30 @@
 -- Bulk writes must be chunked to ~10,000 rows per transaction.
 
 -- ── Tenants ───────────────────────────────────────────────────────────────────
+-- TENANT IDENTITY
+-- id is the workspace SLUG, not a UUID, and it is the same value as:
+--   * the Cognito custom:tenant_id claim
+--   * the host label in <slug>.impulsoiq.rinegansolutions.com
+--   * the tenant_id column on every other table
+--
+-- One value for all three is what makes subdomain isolation a string
+-- comparison instead of a lookup on every request. It is also forced by
+-- Cognito: custom:tenant_id is declared mutable = false, so it is fixed at
+-- sign-up, before any tenant row exists to generate an id from -- there is no
+-- point at which a server-generated UUID could be written back into the claim.
+--
+-- The CHECK is what keeps that safe. The slug reaches the database from a
+-- user-supplied workspace name, and it becomes a DNS label, so it is
+-- constrained to the intersection of both: lowercase alphanumerics and inner
+-- hyphens, 2-40 characters. Reserved labels (www, app, api, ...) are rejected
+-- separately at sign-up and at the edge.
 CREATE TABLE IF NOT EXISTS tenant (
-  id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  id           TEXT        PRIMARY KEY
+                 CHECK (id ~ '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$'),
   name         TEXT        NOT NULL,
+  -- Mirrors id. Kept as its own column because org-check and the sign-up flow
+  -- query by it, and because a future rename would change the subdomain
+  -- without rewriting every foreign key.
   subdomain    TEXT        NOT NULL,
   email_domain TEXT,        -- e.g. "acmecorp.com" — used for org-detection during sign-up
   tier         TEXT        NOT NULL DEFAULT 'starter'
@@ -22,7 +43,7 @@ CREATE        INDEX IF NOT EXISTS idx_tenant_email_domain ON tenant(email_domain
 -- ── Accounts (companies) ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS account (
   id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id       UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id       TEXT        NOT NULL REFERENCES tenant(id),
   name            TEXT        NOT NULL,
   domain          TEXT,
   industry        TEXT,
@@ -40,7 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_account_domain  ON account(tenant_id, domain);
 -- ── Contacts ──────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS contact (
   id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id       UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id       TEXT        NOT NULL REFERENCES tenant(id),
   account_id      UUID        REFERENCES account(id),
   first_name      TEXT        NOT NULL,
   last_name       TEXT        NOT NULL,
@@ -65,7 +86,7 @@ CREATE INDEX IF NOT EXISTS idx_contact_stage   ON contact(tenant_id, stage);
 -- ── Deals ─────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS deal (
   id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id     UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id     TEXT        NOT NULL REFERENCES tenant(id),
   account_id    UUID        NOT NULL REFERENCES account(id),
   contact_id    UUID        REFERENCES contact(id),
   name          TEXT        NOT NULL,
@@ -86,7 +107,7 @@ CREATE INDEX IF NOT EXISTS idx_deal_stage   ON deal(tenant_id, stage);
 -- ── Campaigns ─────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS campaign (
   id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id     UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id     TEXT        NOT NULL REFERENCES tenant(id),
   name          TEXT        NOT NULL,
   type          TEXT        NOT NULL DEFAULT 'sdr_qualification',
   status        TEXT        NOT NULL DEFAULT 'draft'
@@ -102,7 +123,7 @@ CREATE INDEX IF NOT EXISTS idx_campaign_status ON campaign(tenant_id, status);
 -- ── Agent Runs ────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS agent_run (
   id                          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id                   UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id                   TEXT        NOT NULL REFERENCES tenant(id),
   campaign_id                 UUID        REFERENCES campaign(id),
   contact_id                  UUID        NOT NULL REFERENCES contact(id),
   agent_type                  TEXT        NOT NULL
@@ -128,7 +149,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_run_status   ON agent_run(tenant_id, status
 -- ── Activities (human- and agent-authored — same table by design) ─────────────
 CREATE TABLE IF NOT EXISTS activity (
   id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id     UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id     TEXT        NOT NULL REFERENCES tenant(id),
   contact_id    UUID        REFERENCES contact(id),
   account_id    UUID        REFERENCES account(id),
   deal_id       UUID        REFERENCES deal(id),
@@ -151,7 +172,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_occurred  ON activity(tenant_id, occurre
 -- ── Call Results ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS call_result (
   id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id         UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id         TEXT        NOT NULL REFERENCES tenant(id),
   agent_run_id      UUID        REFERENCES agent_run(id),
   contact_id        UUID        NOT NULL REFERENCES contact(id),
   call_id           TEXT        NOT NULL,
@@ -175,7 +196,7 @@ CREATE INDEX        IF NOT EXISTS idx_call_result_contact     ON call_result(con
 -- activation record (status, config overrides, legal review) lives here.
 CREATE TABLE IF NOT EXISTS workspace_template (
   id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id         UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id         TEXT        NOT NULL REFERENCES tenant(id),
   template_key      TEXT        NOT NULL,   -- 'recruiting_coordination', 'accounts_receivable', etc.
   name              TEXT        NOT NULL,
   status            TEXT        NOT NULL DEFAULT 'inactive'
@@ -195,7 +216,7 @@ CREATE INDEX IF NOT EXISTS idx_workspace_template_status ON workspace_template(t
 -- Every outbound action (email/SMS/call) checks this table before executing.
 CREATE TABLE IF NOT EXISTS consent_record (
   id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id   UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id   TEXT        NOT NULL REFERENCES tenant(id),
   contact_id  UUID        NOT NULL REFERENCES contact(id),
   channel     TEXT        NOT NULL CHECK (channel IN ('email','sms','call')),
   granted     BOOLEAN     NOT NULL,
@@ -245,7 +266,7 @@ ALTER TABLE tenant
 -- Records cross-department agent handoff events for audit and observability.
 CREATE TABLE IF NOT EXISTS a2a_handoff (
   id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id        UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id        TEXT        NOT NULL REFERENCES tenant(id),
   from_template    TEXT        NOT NULL,
   to_template      TEXT        NOT NULL,
   context_entity   TEXT        NOT NULL,  -- 'deal', 'contact', etc.

@@ -123,7 +123,11 @@ function needsHumanEscalation(
 // ── Handler ──────────────────────────────────────────────────────────────────
 
 export const handler: APIGatewayProxyHandler = async (event) => {
-  const tenantId = event.requestContext.authorizer?.tenantId as string | undefined;
+  // COGNITO_USER_POOLS authorizer: verified ID-token claims live at
+  // requestContext.authorizer.claims as a flat string map. Not .tenantId
+  // (custom authorizer) and not .jwt.claims (HTTP API v2).
+  const claims = event.requestContext.authorizer?.claims as Record<string, string> | undefined;
+  const tenantId = claims?.['custom:tenant_id'];
   if (!tenantId) return { statusCode: 401, body: JSON.stringify({ error: 'Unauthorized' }) };
 
   const body = JSON.parse(event.body ?? '{}') as {

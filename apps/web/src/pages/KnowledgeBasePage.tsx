@@ -5,32 +5,19 @@
  * The embedding pipeline (S3 Vectors) is built in Phase 7 but consumed
  * by the Resolution Agent in Phase 8. (v4 §7E)
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Plus, Search, Book, CheckCircle2, FileText, AlertCircle, Edit2 } from 'lucide-react';
 import { AppShell } from '@/components/app/AppShell';
 import { SEO } from '@/components/SEO';
+import { knowledgeApi } from '@/api/client';
+import type { KnowledgeArticle } from '@/api/schemas';
 import { cn } from '@/lib/utils';
 
-interface Article {
-  id:             string;
-  title:          string;
-  body:           string;
-  status:         'draft' | 'published' | 'deprecated';
-  version:        number;
-  tags:           string[];
-  lastReviewedAt?: string;
-  updatedAt:      string;
-}
-
-const MOCK_ARTICLES: Article[] = [
-  { id: 'a1', title: 'How to download your invoice', status: 'published', version: 2, tags: ['billing', 'invoices'], lastReviewedAt: '2026-09-01', updatedAt: '2026-09-01', body: 'To download your invoice, navigate to Settings → Billing → Invoices. All invoices are available in PDF format.' },
-  { id: 'a2', title: 'Setting up an outreach campaign', status: 'published', version: 3, tags: ['campaigns', 'outreach'], lastReviewedAt: '2026-08-28', updatedAt: '2026-08-28', body: 'To create a new campaign: 1. Go to Campaigns → New Campaign. 2. Select your ICP targets. 3. Configure the sequence.' },
-  { id: 'a3', title: 'Resetting your password', status: 'published', version: 1, tags: ['auth', 'account'], lastReviewedAt: '2026-08-15', updatedAt: '2026-08-15', body: 'Click Forgot Password on the sign-in page. Enter your email address and we will send you a reset link.' },
-  { id: 'a4', title: 'Pricing plan comparison — Growth vs Enterprise', status: 'draft', version: 1, tags: ['billing', 'pricing'], updatedAt: '2026-09-02', body: 'Draft: pricing comparison table here.' },
-  { id: 'a5', title: 'Understanding contact enrichment scores', status: 'published', version: 2, tags: ['enrichment', 'scoring'], lastReviewedAt: '2026-08-20', updatedAt: '2026-08-20', body: 'Contact enrichment scores range from 0-100. Scores above 70 are high-ICP fit.' },
-  { id: 'a6', title: 'Legacy API v1 integration guide', status: 'deprecated', version: 4, tags: ['api', 'legacy'], updatedAt: '2026-07-01', body: 'This guide is deprecated. Please use the v2 API documentation instead.' },
-];
+// The local Article interface and its six fixture rows are gone; the shape now
+// comes from the API. Note search_knowledge_articles returns no updated_at, so
+// last_reviewed_at is what the UI can show.
+type Article = KnowledgeArticle;
 
 const STATUS_CONFIG = {
   published:  { label: 'Published', icon: CheckCircle2, cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400' },
@@ -39,16 +26,26 @@ const STATUS_CONFIG = {
 };
 
 export default function KnowledgeBasePage() {
-  const [articles, setArticles] = useState<Article[]>(MOCK_ARTICLES);
+  const [articles, setArticles] = useState<Article[]>([]);
+  const [loading, setLoading]   = useState(true);
   const [search, setSearch]     = useState('');
   const [selected, setSelected] = useState<Article | null>(null);
   const [editBody, setEditBody] = useState('');
   const [isEditing, setIsEditing] = useState(false);
 
+  useEffect(() => {
+    // No status filter: the browse view shows drafts and deprecated articles
+    // too, unlike the Resolution Agent which only ever reads published ones.
+    knowledgeApi.search('', undefined, 100)
+      .then(setArticles)
+      .catch(() => setArticles([]))
+      .finally(() => setLoading(false));
+  }, []);
+
   const filtered = articles.filter(a =>
     !search ||
     a.title.toLowerCase().includes(search.toLowerCase()) ||
-    a.tags.some(t => t.includes(search.toLowerCase()))
+    (a.tags ?? []).some(t => t.includes(search.toLowerCase()))
   );
 
   const published  = articles.filter(a => a.status === 'published').length;
@@ -57,7 +54,7 @@ export default function KnowledgeBasePage() {
 
   function selectArticle(a: Article) {
     setSelected(a);
-    setEditBody(a.body);
+    setEditBody(a.body ?? '');
     setIsEditing(false);
   }
 
@@ -69,7 +66,7 @@ export default function KnowledgeBasePage() {
 
   function saveEdit() {
     if (!selected) return;
-    setArticles(p => p.map(a => a.id === selected.id ? { ...a, body: editBody, version: a.version + 1, updatedAt: new Date().toISOString() } : a));
+    setArticles(p => p.map(a => a.id === selected.id ? { ...a, body: editBody, version: (a.version ?? 0) + 1 } : a));
     setSelected(prev => prev ? { ...prev, body: editBody } : null);
     setIsEditing(false);
   }
@@ -100,6 +97,15 @@ export default function KnowledgeBasePage() {
             </div>
           </div>
           <div className="flex-1 overflow-y-auto">
+            {(loading || filtered.length === 0) && (
+              <div className="py-12 px-4 text-center text-[0.84rem] text-slate-400 dark:text-slate-600">
+                {loading
+                  ? 'Loading articles…'
+                  : search
+                    ? 'No articles match your search'
+                    : 'No knowledge articles yet'}
+              </div>
+            )}
             {filtered.map((a, i) => {
               const cfg = STATUS_CONFIG[a.status];
               return (
@@ -113,7 +119,7 @@ export default function KnowledgeBasePage() {
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-[0.68rem] text-slate-400 dark:text-slate-600">v{a.version}</span>
-                    {a.tags.slice(0,2).map(t => <span key={t} className="text-[0.62rem] bg-slate-100 dark:bg-white/[0.06] text-slate-500 px-1.5 py-0.5 rounded">{t}</span>)}
+                    {(a.tags ?? []).slice(0,2).map(t => <span key={t} className="text-[0.62rem] bg-slate-100 dark:bg-white/[0.06] text-slate-500 px-1.5 py-0.5 rounded">{t}</span>)}
                   </div>
                 </motion.button>
               );
@@ -169,7 +175,7 @@ export default function KnowledgeBasePage() {
                   <div className="bg-white dark:bg-[#0d1526] border border-slate-200 dark:border-white/[0.065] rounded-2xl p-6">
                     <p className="text-[0.9rem] text-slate-700 dark:text-slate-300 leading-relaxed whitespace-pre-wrap">{selected.body}</p>
                     <div className="mt-5 pt-4 border-t border-slate-100 dark:border-white/[0.05] flex flex-wrap gap-1.5">
-                      {selected.tags.map(t => <span key={t} className="text-[0.72rem] font-medium px-2 py-1 rounded-lg bg-slate-100 dark:bg-white/[0.07] text-slate-600 dark:text-slate-400">{t}</span>)}
+                      {(selected.tags ?? []).map(t => <span key={t} className="text-[0.72rem] font-medium px-2 py-1 rounded-lg bg-slate-100 dark:bg-white/[0.07] text-slate-600 dark:text-slate-400">{t}</span>)}
                     </div>
                     <p className="mt-3 text-[0.72rem] text-slate-400 dark:text-slate-600">
                       Embedding pipeline: {selected.status === 'published' ? '✓ Embedded in S3 Vectors — available to Resolution Agent (Phase 8)' : '○ Not embedded — publish to make available for grounded resolution'}

@@ -1,0 +1,119 @@
+version: 0.2
+# Applies the Aurora DSQL schema and seeds the agent registry.
+# ENV is set by the calling CodeBuild project.
+#
+# WHY THIS STAGE EXISTS
+# Nothing applied schema.sql. CLAUDE.md documented it as a manual psql command
+# and the registry-seeder Lambda as a manual `aws lambda invoke`, so a fresh
+# environment came up with every table missing and an empty catalog -- Terraform
+# reported success and every screen failed at runtime.
+#
+# WHY IT IS SAFE TO RUN ON EVERY DEPLOY
+# Both schema files are written with CREATE TABLE IF NOT EXISTS / CREATE INDEX
+# IF NOT EXISTS / ADD COLUMN IF NOT EXISTS, and the seeder upserts on
+# (entry_type, key). Re-running is a no-op, which is what makes it appropriate
+# in a pipeline rather than a one-off runbook step.
+#
+# ORDERING
+# This runs AFTER terraform apply (the cluster and the Lambda must exist) and
+# BEFORE anything that reads data. It is a separate action rather than part of
+# apply because a failed migration should be distinguishable from a failed
+# infrastructure change.
+
+phases:
+  install:
+    commands:
+      # DSQL speaks the PostgreSQL wire protocol; psql 16 is what AL2023 ships.
+      - yum install -y postgresql16 || yum install -y postgresql15
+      - psql --version
+      - |
+        set -e
+        # `aws dsql` is recent. The image's bundled CLI may predate it, and the
+        # failure mode is an unhelpful "Invalid choice" at the point the token
+        # is minted, so probe for it here and upgrade in place if missing.
+        if aws dsql generate-db-connect-admin-auth-token help >/dev/null 2>&1; then
+          echo "aws dsql available: $(aws --version 2>&1)"
+        else
+          echo "aws dsql missing from $(aws --version 2>&1) — installing latest CLI"
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscliv2.zip
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          /tmp/aws/install --update --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli
+          hash -r
+          aws --version
+          aws dsql generate-db-connect-admin-auth-token help >/dev/null
+        fi
+
+  pre_build:
+    commands:
+      - |
+        set -euo pipefail
+        cd "$CODEBUILD_SRC_DIR/infra-backend"
+
+        # Terraform owns these values; SSM is how they leave the apply stage.
+        DSQL_ENDPOINT=$(aws ssm get-parameter \
+          --name "/impulsoiq/${ENV}/backend/dsql_endpoint" \
+          --query 'Parameter.Value' --output text)
+        echo "DSQL endpoint: ${DSQL_ENDPOINT}"
+
+        # A DSQL password is a short-lived signed token, not a secret at rest.
+        # It must be minted here and used immediately.
+        PGPASSWORD=$(aws dsql generate-db-connect-admin-auth-token \
+          --hostname "${DSQL_ENDPOINT}" \
+          --region "${AWS_REGION}" \
+          --expires-in 3600 \
+          --output text)
+
+        export DSQL_ENDPOINT PGPASSWORD
+
+        # Persist for the build phase: each command runs in its own shell.
+        echo "export DSQL_ENDPOINT='${DSQL_ENDPOINT}'" >  /tmp/dsql.env
+        echo "export PGPASSWORD='${PGPASSWORD}'"       >> /tmp/dsql.env
+
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        . /tmp/dsql.env
+        cd "$CODEBUILD_SRC_DIR/infra-backend/modules/data"
+
+        # ON_ERROR_STOP makes psql exit non-zero on the first failed statement.
+        # Without it psql reports success after printing errors, and a broken
+        # migration would deploy silently.
+        for f in schema.sql schema-phase7.sql; do
+          [ -f "$f" ] || { echo "missing $f"; exit 1; }
+          echo "── applying $f ──"
+          psql "host=${DSQL_ENDPOINT} port=5432 dbname=postgres user=admin sslmode=require" \
+            --set ON_ERROR_STOP=1 \
+            --no-psqlrc \
+            -f "$f"
+        done
+        echo "schema applied"
+
+      - |
+        set -euo pipefail
+        echo "── seeding the agent registry ──"
+        # RequestResponse so a seeding failure fails the build. Fire-and-forget
+        # would let the pipeline go green with an empty catalog.
+        aws lambda invoke \
+          --function-name "impulsoiq-registry-seeder-${ENV}" \
+          --invocation-type RequestResponse \
+          --cli-binary-format raw-in-base64-out \
+          --payload '{}' \
+          /tmp/seed-response.json \
+          --query 'FunctionError' --output text > /tmp/seed-error.txt
+
+        cat /tmp/seed-response.json; echo
+        if [ "$(cat /tmp/seed-error.txt)" != "None" ]; then
+          echo "ERROR: registry-seeder returned a function error."
+          exit 1
+        fi
+        echo "registry seeded"
+
+  post_build:
+    commands:
+      - |
+        if [ "$CODEBUILD_BUILD_SUCCEEDING" = "1" ]; then
+          echo "Migration complete for env=${ENV}"
+        else
+          echo "Migration FAILED for env=${ENV}"
+        fi

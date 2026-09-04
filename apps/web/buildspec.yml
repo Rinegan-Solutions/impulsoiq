@@ -18,6 +18,11 @@ phases:
       - echo "Building web app for ENV=${ENV}"
       - export WEB_BUCKET=$(aws ssm get-parameter --name "/impulsoiq/${ENV}/web/bucket" --query 'Parameter.Value' --output text)
       - export CF_DISTRIBUTION_ID=$(aws ssm get-parameter --name "/impulsoiq/${ENV}/web/cloudfront_id" --query 'Parameter.Value' --output text)
+      # The environment's own host. src/lib/tenant.ts needs it to tell the apex
+      # from a workspace subdomain — on impulsoiq.rinegansolutions.com the first
+      # label is a valid slug, so without the zone the marketing site resolves
+      # as a tenant named "impulsoiq".
+      - export VITE_WEB_ZONE=$(aws ssm get-parameter --name "/impulsoiq/${ENV}/web/domain" --query 'Parameter.Value' --output text)
       # Backend discovery — injected into the Vite build as VITE_* vars.
       # `|| true` keeps the build green before the backend stack exists.
       - export VITE_API_URL=$(aws ssm get-parameter --name "/impulsoiq/${ENV}/backend/api_url" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
@@ -25,7 +30,7 @@ phases:
       - export VITE_COGNITO_CLIENT_ID=$(aws ssm get-parameter --name "/impulsoiq/${ENV}/backend/cognito_client_id" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
       - export VITE_APPSYNC_URL=$(aws ssm get-parameter --name "/impulsoiq/${ENV}/backend/appsync_url" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
       - export VITE_VOICE_WS_URL=$(aws ssm get-parameter --name "/impulsoiq/${ENV}/backend/voice_ws_url" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
-      - echo "Target bucket=${WEB_BUCKET} distribution=${CF_DISTRIBUTION_ID}"
+      - echo "Target bucket=${WEB_BUCKET} distribution=${CF_DISTRIBUTION_ID} zone=${VITE_WEB_ZONE}"
 
   build:
     commands:

@@ -195,9 +195,11 @@ export const handler: Handler<
 
   if ('requestContext' in event) {
     const apigwEvent = event as APIGatewayProxyEvent;
-    // Flat context from the REST custom authorizer — not JWT claims.
-    const ctx = apigwEvent.requestContext?.authorizer;
-    const tenantId = (ctx?.tenantId as string | undefined) ?? null;
+    // COGNITO_USER_POOLS authorizer: verified ID-token claims, flat string map.
+    const claims = apigwEvent.requestContext?.authorizer?.claims as
+      | Record<string, string>
+      | undefined;
+    const tenantId = claims?.['custom:tenant_id'] ?? null;
     if (!tenantId) return { statusCode: 401, body: JSON.stringify({ error: 'Missing tenant_id' }) };
     const body = JSON.parse(apigwEvent.body ?? '{}') as Omit<LeadRouterInput, 'tenantId'>;
     input = { ...body, tenantId };

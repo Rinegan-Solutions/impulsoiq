@@ -1,109 +1,223 @@
 import { z } from 'zod';
 
-// ─── Primitive enums ─────────────────────────────────────────────────────────
+/**
+ * Response shapes for the ImpulsoIQ API.
+ *
+ * THESE NOW DESCRIBE THE DATABASE, NOT THE MOCK.
+ * The previous versions were written against the MSW fixtures and drifted from
+ * Aurora DSQL in three ways that would each have thrown at runtime:
+ *   - snake_case columns vs camelCase fields (the client camelizes centrally now)
+ *   - fields that are not columns: contact.company / contact.industry live on
+ *     `account`; campaign.openRate / callsMade / meetingsBooked are aggregates
+ *     over `activity` and `call_result`, not stored values
+ *   - NOT NULL assumed where the schema allows NULL (contact.email, deal.close_date)
+ *
+ * Nullable columns are `.nullable()`, not `.optional()`. Postgres sends an
+ * explicit null for an empty column; `.optional()` alone rejects that.
+ *
+ * Timestamps are plain strings. pg returns TIMESTAMPTZ as a Date, which
+ * JSON.stringify renders as ISO-8601 — but DATE columns come back as
+ * 'YYYY-MM-DD', which z.string().datetime() rejects. Validating the format
+ * buys nothing here and turns a display concern into a hard failure.
+ */
+
+// ─── Enums (mirror the CHECK constraints in schema.sql) ───────────────────────
 
 export const ActivityTypeSchema = z.enum(['email', 'sms', 'call', 'note', 'task', 'meeting']);
-export const ActorTypeSchema    = z.enum(['human', 'agent']);
+export const ActorTypeSchema = z.enum(['human', 'agent']);
 export const CampaignStatusSchema = z.enum(['draft', 'active', 'paused', 'completed', 'cancelled']);
 export const AgentRunStatusSchema = z.enum(['pending', 'running', 'paused', 'completed', 'failed']);
-export const PipelineStageSchema  = z.enum([
-  'Prospecting', 'Qualified', 'Demo Booked', 'Proposal', 'Negotiating', 'Closed Won',
+export const PipelineStageSchema = z.enum([
+  'Prospecting',
+  'Qualified',
+  'Demo Booked',
+  'Proposal',
+  'Negotiating',
+  'Closed Won',
 ]);
-export const AgentTypeSchema = z.enum(['research', 'outreach', 'voice', 'crm', 'coord']);
+export const AgentTypeSchema = z.enum([
+  'coordinator',
+  'clarification',
+  'research_enrichment',
+  'outreach',
+  'voice',
+  'nurture',
+]);
 
 // ─── Core entities ────────────────────────────────────────────────────────────
 
 export const ContactSchema = z.object({
-  id:           z.string().uuid(),
-  tenantId:     z.string(),
-  firstName:    z.string().min(1),
-  lastName:     z.string().min(1),
-  email:        z.string().email().optional(),
-  phone:        z.string().optional(),
-  title:        z.string().optional(),
-  company:      z.string().optional(),
-  industry:     z.string().optional(),
-  score:        z.number().int().min(0).max(100).optional(),
-  stage:        PipelineStageSchema.optional(),
-  lastActivity: z.string().datetime().optional(),
-  createdAt:    z.string().datetime(),
+  id: z.string(),
+  tenantId: z.string(),
+  accountId: z.string().nullable().optional(),
+  firstName: z.string(),
+  lastName: z.string(),
+  email: z.string().nullable().optional(),
+  phone: z.string().nullable().optional(),
+  title: z.string().nullable().optional(),
+  linkedinUrl: z.string().nullable().optional(),
+  stage: PipelineStageSchema,
+  score: z.number().int(),
+  enrichmentJson: z.record(z.string(), z.unknown()).optional(),
+  customFields: z.record(z.string(), z.unknown()).optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  // Joined by list_contacts, not columns on `contact`:
+  //   accountName      <- account.name        (the UI's "company")
+  //   lastActivityAt   <- MAX(activity.occurred_at)
+  // Absent on get_contact, hence optional.
+  accountName: z.string().nullable().optional(),
+  lastActivityAt: z.string().nullable().optional(),
 });
 
 export const CampaignSchema = z.object({
-  id:              z.string().uuid(),
-  tenantId:        z.string(),
-  name:            z.string().min(1),
-  type:            z.literal('sdr_qualification'),
-  status:          CampaignStatusSchema,
-  contactsTotal:   z.number().int().min(0),
-  contactsTouched: z.number().int().min(0),
-  openRate:        z.number().min(0).max(100),
-  replyRate:       z.number().min(0).max(100),
-  callsMade:       z.number().int().min(0),
-  meetingsBooked:  z.number().int().min(0),
-  createdAt:       z.string().datetime(),
+  id: z.string(),
+  tenantId: z.string(),
+  name: z.string(),
+  type: z.string(),
+  status: CampaignStatusSchema,
+  config: z.record(z.string(), z.unknown()).optional(),
+  goalTemplate: z.string().nullable().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  // Aggregates computed by list_campaigns over agent_run/activity/call_result.
+  // COUNT() comes back from pg as a string, hence coerce.
+  // There is no openRate/replyRate: nothing in the schema records an email
+  // being opened or replied to, so those cannot be derived honestly.
+  contactsTotal: z.coerce.number().optional(),
+  contactsTouched: z.coerce.number().optional(),
+  callsMade: z.coerce.number().optional(),
+  meetingsBooked: z.coerce.number().optional(),
+  agentRuns: z.coerce.number().optional(),
 });
 
 export const AgentRunSchema = z.object({
-  id:          z.string().uuid(),
-  tenantId:    z.string(),
-  campaignId:  z.string().uuid(),
-  contactId:   z.string().uuid(),
-  contactName: z.string(),
-  company:     z.string().optional(),
-  agentType:   AgentTypeSchema,
-  status:      AgentRunStatusSchema,
-  startedAt:   z.string().datetime(),
-  endedAt:     z.string().datetime().optional(),
-});
-
-export const AgentActionSchema = z.object({
-  id:         z.string().uuid(),
-  agentRunId: z.string().uuid(),
-  agentType:  AgentTypeSchema,
-  action:     z.string(),
-  status:     z.enum(['running', 'completed', 'failed', 'awaiting_approval']),
-  occurredAt: z.string().datetime(),
+  id: z.string(),
+  tenantId: z.string(),
+  campaignId: z.string().nullable().optional(),
+  contactId: z.string(),
+  agentType: AgentTypeSchema,
+  status: AgentRunStatusSchema,
+  stepFunctionsExecutionArn: z.string().nullable().optional(),
+  input: z.record(z.string(), z.unknown()).optional(),
+  output: z.record(z.string(), z.unknown()).nullable().optional(),
+  error: z.string().nullable().optional(),
+  startedAt: z.string(),
+  endedAt: z.string().nullable().optional(),
+  createdAt: z.string().optional(),
+  // Joined from `contact` by list_agent_runs so the table can show a name
+  // without an N+1 fetch per row.
+  firstName: z.string().nullable().optional(),
+  lastName: z.string().nullable().optional(),
 });
 
 export const DealSchema = z.object({
-  id:        z.string().uuid(),
-  tenantId:  z.string(),
-  name:      z.string().min(1),
-  contactId: z.string().uuid(),
-  company:   z.string(),
-  stage:     PipelineStageSchema,
-  amount:    z.number().min(0),
-  closeDate: z.string().optional(),
-  createdAt: z.string().datetime(),
+  id: z.string(),
+  tenantId: z.string(),
+  accountId: z.string(),
+  contactId: z.string().nullable().optional(),
+  name: z.string(),
+  // NUMERIC arrives from pg as a string to preserve precision. Coerce so the
+  // UI can do arithmetic without every caller remembering to parse it.
+  amount: z.coerce.number(),
+  stage: PipelineStageSchema,
+  probability: z.number().int(),
+  closeDate: z.string().nullable().optional(),
+  customFields: z.record(z.string(), z.unknown()).optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  // Joined by list_deals from `account`.
+  accountName: z.string().nullable().optional(),
 });
 
+// The FORECASTING projection from get_pipeline_data. Deliberately separate
+// from DealSchema: that query omits tenant_id/account_id, excludes Closed Won,
+// and adds aggregate columns. Relaxing DealSchema to cover both would make the
+// deals table accept rows that are missing fields it needs.
+export const PipelineDealSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  stage: PipelineStageSchema,
+  amount: z.coerce.number(),
+  probability: z.number().int(),
+  closeDate: z.string().nullable().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  lastActivityAt: z.string().nullable().optional(),
+  activityCount: z.coerce.number().optional(),
+});
+
+// ─── Dashboard ────────────────────────────────────────────────────────────────
+// Matches the single aggregate statement in crm-read's get_dashboard_stats.
 export const DashboardStatsSchema = z.object({
-  pipelineValue:   z.number(),
-  dealsWonMonth:   z.number().int(),
-  agentRunsToday:  z.number().int(),
-  meetingsBooked:  z.number().int(),
-  pipelineByStage: z.array(z.object({
-    stage: PipelineStageSchema,
-    count: z.number().int(),
-    value: z.number(),
-  })),
-  campaignSummary: z.array(CampaignSchema.pick({
-    id: true, name: true, status: true,
-    contactsTotal: true, contactsTouched: true,
-    openRate: true, replyRate: true, callsMade: true, meetingsBooked: true,
-  })),
+  totalContacts: z.number().int(),
+  activeCampaigns: z.number().int(),
+  runningAgents: z.number().int(),
+  totalDeals: z.number().int(),
+  pipelineValue: z.coerce.number(),
 });
 
-// ─── API request bodies ───────────────────────────────────────────────────────
+// ─── Knowledge base (Phase 8A) ───────────────────────────────────────────────
+// Mirrors search_knowledge_articles' projection exactly.
+export const KnowledgeArticleSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  body: z.string().nullable().optional(),
+  status: z.enum(['draft', 'published', 'deprecated']),
+  version: z.coerce.number().optional(),
+  lastReviewedAt: z.string().nullable().optional(),
+  tags: z.array(z.string()).nullable().optional(),
+});
+
+// ─── Registry (Phase 6B) ──────────────────────────────────────────────────────
+
+// Matches get_registry's projection exactly: it selects `key` (not entry_key),
+// and returns no id or tenant_id — the registry is a platform-wide catalog
+// seeded by the registry-seeder Lambda, not per-tenant data.
+export const RegistryEntrySchema = z.object({
+  entryType: z.enum(['agent', 'tool', 'template']).or(z.string()),
+  key: z.string(),
+  name: z.string(),
+  description: z.string().nullable().optional(),
+  version: z.string().nullable().optional(),
+  capabilities: z.array(z.string()).nullable().optional(),
+  phaseIntroduced: z.string().nullable().optional(),
+  status: z.string().nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).nullable().optional(),
+});
+
+// ─── Workspace templates (Phase 5) ────────────────────────────────────────────
+
+export const TemplateActivationSchema = z.object({
+  id: z.string(),
+  tenantId: z.string().nullable().optional(),
+  templateKey: z.string(),
+  status: z.enum(['active', 'inactive', 'pending_review']),
+  config: z.record(z.string(), z.unknown()).optional(),
+  legalReviewedBy: z.string().nullable().optional(),
+  legalReviewedAt: z.string().nullable().optional(),
+  createdAt: z.string().nullable().optional(),
+});
+
+// ─── Org check (public, pre-signup) ───────────────────────────────────────────
+
+export const OrgCheckSchema = z.object({
+  tenants: z.array(
+    z.object({
+      name: z.string(),
+      subdomain: z.string().nullable().optional(),
+    }),
+  ),
+});
+
+// ─── Request bodies ───────────────────────────────────────────────────────────
 
 export const CreateContactBody = z.object({
   firstName: z.string().min(1, 'First name is required'),
-  lastName:  z.string().min(1, 'Last name is required'),
-  email:     z.string().email('Enter a valid email').optional(),
-  phone:     z.string().optional(),
-  title:     z.string().optional(),
-  company:   z.string().optional(),
+  lastName: z.string().min(1, 'Last name is required'),
+  email: z.string().email('Enter a valid email').optional(),
+  phone: z.string().optional(),
+  title: z.string().optional(),
 });
 
 export const UpdateAgentRunBody = z.object({
@@ -116,15 +230,18 @@ export const PaginatedSchema = <T extends z.ZodTypeAny>(item: T) =>
   z.object({
     items: z.array(item),
     total: z.number().int(),
-    page:  z.number().int(),
+    page: z.number().int(),
     pageSize: z.number().int(),
   });
 
 // ─── Inferred TypeScript types ────────────────────────────────────────────────
 
-export type Contact        = z.infer<typeof ContactSchema>;
-export type Campaign       = z.infer<typeof CampaignSchema>;
-export type AgentRun       = z.infer<typeof AgentRunSchema>;
-export type AgentAction    = z.infer<typeof AgentActionSchema>;
-export type Deal           = z.infer<typeof DealSchema>;
+export type Contact = z.infer<typeof ContactSchema>;
+export type Campaign = z.infer<typeof CampaignSchema>;
+export type AgentRun = z.infer<typeof AgentRunSchema>;
+export type Deal = z.infer<typeof DealSchema>;
+export type PipelineDeal = z.infer<typeof PipelineDealSchema>;
 export type DashboardStats = z.infer<typeof DashboardStatsSchema>;
+export type RegistryEntry = z.infer<typeof RegistryEntrySchema>;
+export type KnowledgeArticle = z.infer<typeof KnowledgeArticleSchema>;
+export type TemplateActivation = z.infer<typeof TemplateActivationSchema>;

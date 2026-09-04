@@ -113,14 +113,14 @@ export default function DealsPage() {
                       >
                         <div className="flex items-start justify-between mb-2.5">
                           <div className={cn('w-8 h-8 rounded-xl bg-gradient-to-br text-white text-[0.65rem] font-bold flex items-center justify-center flex-shrink-0', AVATAR_COLORS[i % AVATAR_COLORS.length])}>
-                            {initials(deal.company)}
+                            {initials(deal.accountName ?? deal.name)}
                           </div>
                           <button className="opacity-0 group-hover:opacity-100 w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 hover:bg-slate-100 dark:hover:bg-white/[0.07] transition-all">
                             <MoreHorizontal size={12} />
                           </button>
                         </div>
                         <p className="text-[0.82rem] font-semibold text-slate-800 dark:text-slate-200 leading-snug mb-0.5">{deal.name}</p>
-                        <p className="text-[0.72rem] text-slate-400 dark:text-slate-600 mb-2.5">{deal.company}</p>
+                        <p className="text-[0.72rem] text-slate-400 dark:text-slate-600 mb-2.5">{deal.accountName ?? '—'}</p>
                         <div className="flex items-center justify-between">
                           <span className="text-[0.84rem] font-extrabold text-slate-900 dark:text-white tabular-nums">{fmt(deal.amount)}</span>
                           {deal.closeDate && (

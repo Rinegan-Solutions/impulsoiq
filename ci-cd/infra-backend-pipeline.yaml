@@ -136,6 +136,9 @@ Resources:
                   - !GetAtt AgentImageBuildDev.Arn
                   - !GetAtt AgentImageBuildTest.Arn
                   - !GetAtt AgentImageBuildProd.Arn
+                  - !GetAtt MigrateBuildDev.Arn
+                  - !GetAtt MigrateBuildTest.Arn
+                  - !GetAtt MigrateBuildProd.Arn
               - Effect: Allow
                 Action:
                   - codestar-connections:UseConnection
@@ -1215,6 +1218,87 @@ Resources:
           Value: prod
 
   # ─── Pipeline 1: Non-Prod (develop → dev → test) ─────────────────────────────
+  # Applies the DSQL schema and seeds the agent registry. Separate from the
+  # apply project so a failed migration is distinguishable from a failed
+  # infrastructure change, and so it can be re-run on its own.
+  MigrateBuildDev:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-migrate-dev'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleDev.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-migrate.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: dev
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: dev
+
+  # Applies the DSQL schema and seeds the agent registry. Separate from the
+  # apply project so a failed migration is distinguishable from a failed
+  # infrastructure change, and so it can be re-run on its own.
+  MigrateBuildTest:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-migrate-test'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleTest.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-migrate.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: test
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: test
+
+  # Applies the DSQL schema and seeds the agent registry. Separate from the
+  # apply project so a failed migration is distinguishable from a failed
+  # infrastructure change, and so it can be re-run on its own.
+  MigrateBuildProd:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-migrate-prod'
+      ServiceRole: !GetAtt CodeBuildTerraformRoleProd.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra-backend/buildspec-migrate.yml
+      Environment:
+        Type: ARM_CONTAINER
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ENV
+            Value: prod
+      Artifacts:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Project
+          Value: ImpulsoIQ
+        - Key: Environment
+          Value: prod
+
   NonProdPipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
@@ -1361,6 +1445,20 @@ Resources:
                 PrimarySource: SourceOutputDev
               RunOrder: 5
 
+            # Runs immediately after apply: the cluster and the seeder Lambda must
+            # exist, and nothing downstream should read a database with no tables.
+            - Name: MigrateDev
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+              Configuration:
+                ProjectName: !Ref MigrateBuildDev
+              RunOrder: 6
+
         # Stage 3: Deploy Test
         - Name: DeployTest
           Actions:
@@ -1443,6 +1541,20 @@ Resources:
                 ProjectName: !Ref TerraformDeployTestBuild
                 PrimarySource: SourceOutputDev
               RunOrder: 5
+
+            # Runs immediately after apply: the cluster and the seeder Lambda must
+            # exist, and nothing downstream should read a database with no tables.
+            - Name: MigrateTest
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputDev
+              Configuration:
+                ProjectName: !Ref MigrateBuildTest
+              RunOrder: 6
 
   # ─── Pipeline 2: Prod (main → prod, double gate) ─────────────────────────────
   ProdPipeline:
@@ -1606,6 +1718,20 @@ Resources:
                 ProjectName: !Ref TerraformDeployProdBuild
                 PrimarySource: SourceOutputProd
               RunOrder: 6
+
+            # Runs immediately after apply: the cluster and the seeder Lambda must
+            # exist, and nothing downstream should read a database with no tables.
+            - Name: MigrateProd
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutputProd
+              Configuration:
+                ProjectName: !Ref MigrateBuildProd
+              RunOrder: 7
 
 Outputs:
   NonProdPipelineName:

@@ -3,6 +3,10 @@ import { Link, useNavigate } from 'react-router-dom';
 import { ArrowLeft, ArrowRight, Users, Plus } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { signUp } from '@/lib/auth/cognito';
+// Shared with the CloudFront function and the tenant.id CHECK constraint —
+// all three must agree or a workspace can be created that is unreachable at
+// its own address.
+import { toSlug, isReservedSlug, isValidSlug } from '@/lib/tenant';
 import { orgCheckApi } from '@/api/client';
 import {
   SplitLayout, BrandPanel, AuthHeading,
@@ -28,11 +32,14 @@ const PANEL = (
 
 type Step = 'email' | 'org-choice' | 'create' | 'join';
 
-interface OrgTenant { id: string; name: string; subdomain: string }
+// org-check returns only non-sensitive fields (name + subdomain) by design —
+// the caller has not signed up yet, so there is no id to hand out.
+// The environment's host, injected at build time. Hardcoding impulsoiq.com
+// here showed users a URL that does not exist.
+const ZONE = import.meta.env.VITE_WEB_ZONE ?? 'impulsoiq.rinegansolutions.com';
 
-function toSlug(v: string) {
-  return v.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-}
+interface OrgTenant { name: string; subdomain: string }
+
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -69,7 +76,7 @@ export default function SignUp() {
       setChecking(true);
       try {
         const res = await orgCheckApi.byDomain(domain);
-        setOrgTenants(res.tenants);
+        setOrgTenants(res.tenants.map(t => ({ ...t, subdomain: t.subdomain ?? '' })));
       } catch {
         setOrgTenants([]);
       } finally {
@@ -98,7 +105,16 @@ export default function SignUp() {
   async function handleCreate(e: FormEvent) {
     e.preventDefault();
     const errs: Record<string, string> = {};
-    if (!workspace.trim())    errs.workspace = 'Workspace name is required.';
+    if (!workspace.trim()) {
+      errs.workspace = 'Workspace name is required.';
+    } else {
+      // The slug becomes a DNS label, a database primary key and the tenant
+      // claim, so it is validated here against the same rules all three use.
+      const slug = toSlug(workspace);
+      if (!slug)                   errs.workspace = 'Use at least one letter or number.';
+      else if (isReservedSlug(slug)) errs.workspace = `"${slug}" is reserved. Please choose another name.`;
+      else if (!isValidSlug(slug))   errs.workspace = 'Use 2-40 letters, numbers or hyphens.';
+    }
     if (password.length < 12) errs.password  = 'Password must be at least 12 characters.';
     if (confirm !== password)  errs.confirm   = 'Passwords do not match.';
     if (Object.keys(errs).length) { setErrors(errs); return; }
@@ -184,7 +200,7 @@ export default function SignUp() {
             <div className="flex flex-col gap-3 mb-5">
               {orgTenants.map(t => (
                 <button
-                  key={t.id}
+                  key={t.subdomain}
                   onClick={() => { setSelected(t); setStep('join'); }}
                   className="flex items-center gap-3 px-4 py-3.5 rounded-2xl border border-slate-200 dark:border-white/[0.1] bg-white dark:bg-white/[0.03] hover:border-indigo-400 dark:hover:border-indigo-500/50 hover:bg-indigo-50/40 dark:hover:bg-indigo-500/5 transition-all text-left group"
                 >
@@ -193,7 +209,7 @@ export default function SignUp() {
                   </span>
                   <div className="flex-1 min-w-0">
                     <p className="text-[0.875rem] font-semibold text-slate-900 dark:text-white">{t.name}</p>
-                    <p className="text-[0.75rem] text-slate-400 dark:text-slate-600">{t.subdomain}.impulsoiq.com</p>
+                    <p className="text-[0.75rem] text-slate-400 dark:text-slate-600">{t.subdomain}.{ZONE}</p>
                   </div>
                   <span className="flex items-center gap-1.5 text-[0.75rem] font-semibold text-indigo-600 dark:text-indigo-400 opacity-0 group-hover:opacity-100 transition-opacity">
                     <Users size={13} /> Join
@@ -233,7 +249,7 @@ export default function SignUp() {
                 value={workspace}
                 onChange={e => { setWorkspace(e.target.value); setErrors(p => { const n={...p}; delete n.workspace; return n; }); }}
                 error={errors.workspace}
-                hint={workspace ? `Your URL: ${toSlug(workspace)}.impulsoiq.com` : 'Letters and numbers — this becomes your workspace URL.'}
+                hint={workspace ? `Your URL: ${toSlug(workspace)}.${ZONE}` : 'Letters and numbers — this becomes your workspace URL.'}
                 autoFocus
               />
               <PasswordField
@@ -273,7 +289,7 @@ export default function SignUp() {
               </span>
               <div>
                 <p className="text-[0.875rem] font-semibold text-indigo-800 dark:text-indigo-200">Joining {selectedTenant.name}</p>
-                <p className="text-[0.75rem] text-indigo-600 dark:text-indigo-400">{selectedTenant.subdomain}.impulsoiq.com</p>
+                <p className="text-[0.75rem] text-indigo-600 dark:text-indigo-400">{selectedTenant.subdomain}.{ZONE}</p>
               </div>
             </div>
             <AuthHeading title="Set your password" sub={`You'll be added as a member of ${selectedTenant.name}. A workspace admin will see your request.`} />

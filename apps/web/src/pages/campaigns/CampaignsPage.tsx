@@ -53,8 +53,7 @@ export default function CampaignsPage() {
   async function load() {
     setLoading(true);
     try {
-      const res = await campaignsApi.list();
-      setCampaigns(res.items);
+      setCampaigns(await campaignsApi.list());
     } catch { /* error */ }
     finally { setLoading(false); }
   }
@@ -63,10 +62,11 @@ export default function CampaignsPage() {
 
   async function toggleStatus(c: Campaign) {
     try {
-      const updated = c.status === 'active'
-        ? await campaignsApi.pause(c.id)
-        : await campaignsApi.resume(c.id);
-      setCampaigns(prev => prev.map(x => x.id === updated.id ? updated : x));
+      // crm-write returns {ok, id}, not the updated row, so re-read rather
+      // than patching state with a response that has no campaign in it.
+      const next = c.status === 'active' ? 'paused' : 'active';
+      await campaignsApi.setStatus(c, next);
+      await load();
     } catch { /* error */ }
   }
 
@@ -151,15 +151,18 @@ export default function CampaignsPage() {
 
                   {/* Progress */}
                   <div className="mb-4">
-                    <ProgressBar value={c.contactsTouched} max={c.contactsTotal} status={c.status} />
+                    <ProgressBar value={c.contactsTouched ?? 0} max={c.contactsTotal ?? 0} status={c.status} />
                   </div>
 
                   {/* Stats row */}
                   <div className="grid grid-cols-4 gap-2 pt-3 border-t border-slate-100 dark:border-white/[0.05]">
-                    <StatPill label="Open rate"  value={`${c.openRate}%`} />
-                    <StatPill label="Reply rate" value={`${c.replyRate}%`} highlight />
-                    <StatPill label="Calls"      value={c.callsMade} />
-                    <StatPill label="Meetings"   value={c.meetingsBooked} highlight />
+                    {/* Open/reply rate are not shown: nothing in the schema
+                        records an email open or reply, so there is no honest
+                        number to put here. These four are real aggregates. */}
+                    <StatPill label="Contacts" value={c.contactsTotal ?? 0} />
+                    <StatPill label="Touched"  value={c.contactsTouched ?? 0} highlight />
+                    <StatPill label="Calls"    value={c.callsMade ?? 0} />
+                    <StatPill label="Meetings" value={c.meetingsBooked ?? 0} highlight />
                   </div>
 
                   {/* Footer link */}

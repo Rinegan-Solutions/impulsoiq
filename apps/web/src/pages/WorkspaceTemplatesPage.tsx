@@ -115,10 +115,10 @@ export default function WorkspaceTemplatesPage() {
     setLoading(key);
     try {
       if (isActive) {
-        await templatesApi.deactivate(key);
+        await templatesApi.setStatus(key, 'inactive');
         setActiveKeys(p => { const n = new Set(p); n.delete(key); return n; });
       } else {
-        await templatesApi.activate(key);
+        await templatesApi.setStatus(key, 'active');
         setActiveKeys(p => new Set([...p, key]));
       }
     } catch { /* error */ }

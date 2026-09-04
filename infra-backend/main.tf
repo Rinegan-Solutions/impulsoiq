@@ -100,6 +100,7 @@ module "api" {
   outreach_agent_arn            = module.agentcore.outreach_runtime_arn
   voice_agent_arn               = module.agentcore.voice_runtime_arn
   webhook_handler_arn           = module.lambda.function_arns["webhook-handler"]
+  lambda_function_arns          = module.lambda.function_arns
   send_pause_enforcer_arn       = module.lambda.function_arns["send-pause-enforcer"]
   nurture_trigger_lambda_arn    = module.lambda.function_arns["nurture-trigger"]
   agents_event_bus_name         = module.data.event_bus_name
@@ -177,6 +178,16 @@ module "agentcore" {
 
 # ── SSM parameters — written after all modules apply ─────────────────────────
 # These are the SSM-based discovery values that Lambda functions read at cold start.
+
+# The migrate stage needs the cluster host to apply the schema. It is published
+# here rather than passed as a CodeBuild env var so the pipeline template does
+# not have to know a value Terraform owns.
+resource "aws_ssm_parameter" "dsql_endpoint" {
+  name  = "/impulsoiq/${var.env}/backend/dsql_endpoint"
+  type  = "String"
+  value = module.data.dsql_cluster_endpoint
+  tags  = local.tags
+}
 
 resource "aws_ssm_parameter" "api_url" {
   name  = "/impulsoiq/${var.env}/backend/api_url"

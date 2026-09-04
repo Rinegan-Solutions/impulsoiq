@@ -45,23 +45,29 @@ export default function AccountsPage() {
       const dealList    = dealsRes.items;
 
       const map = new Map<string, Account>();
+      // "Company" is account.name, joined onto both contacts and deals by
+      // list_contacts / list_deals. A contact with no account_id has no company
+      // and cannot be grouped, so it is skipped rather than bucketed under a
+      // placeholder that would look like a real account.
       contactList.forEach(c => {
-        if (!c.company) return;
-        if (!map.has(c.company)) {
-          map.set(c.company, {
-            company: c.company, industry: c.industry ?? 'Unknown',
+        const company = c.accountName;
+        if (!company) return;
+        if (!map.has(company)) {
+          map.set(company, {
+            company, industry: 'Unknown',
             contacts: [], deals: [], pipeline: 0, topScore: 0,
           });
         }
-        const acc = map.get(c.company)!;
+        const acc = map.get(company)!;
         acc.contacts.push(c);
         if ((c.score ?? 0) > acc.topScore) acc.topScore = c.score ?? 0;
-        if (!acc.lastActivity || (c.lastActivity && c.lastActivity > acc.lastActivity))
-          acc.lastActivity = c.lastActivity;
+        if (!acc.lastActivity || (c.lastActivityAt && c.lastActivityAt > acc.lastActivity))
+          acc.lastActivity = c.lastActivityAt ?? undefined;
       });
 
-      dealList.forEach(d => {
-        const acc = map.get(d.company);
+      dealList.forEach((d) => {
+        if (!d.accountName) return;
+        const acc = map.get(d.accountName);
         if (!acc) return;
         acc.deals.push(d);
         if (d.stage !== 'Closed Won') acc.pipeline += d.amount;

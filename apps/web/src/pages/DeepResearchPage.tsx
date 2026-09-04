@@ -29,13 +29,6 @@ interface ResearchResult {
 }
 
 // ── Mock research results for demo ───────────────────────────────────────────
-const MOCK_RESULTS: ResearchResult[] = [
-  { rank: 1, company: 'Northstar Analytics',   reasons: ['Series B FinTech, 180 employees', 'Active hiring in sales ops', 'Using similar CRM stack'], strategies: ['firmographic', 'news_signals', 'technographic'], confidence: 0.91 },
-  { rank: 2, company: 'Meridian SaaS Group',   reasons: ['250 employees, $40M ARR range', 'Similar ICP to Acme Corp deal'], strategies: ['firmographic', 'lookalike'], confidence: 0.87 },
-  { rank: 3, company: 'Apex Growth Co.',       reasons: ['Recently funded $28M Series A', 'B2B SaaS, 90 employees'], strategies: ['news_signals', 'firmographic'], confidence: 0.84 },
-  { rank: 4, company: 'Circlepoint Ventures',  reasons: ['Tech stack overlap (Salesforce + HubSpot)', 'Lookalike to Circlepoint closed deal'], strategies: ['technographic', 'lookalike'], confidence: 0.79 },
-  { rank: 5, company: 'Strata Dynamics',       reasons: ['Series A HealthTech, rapid head-count growth'], strategies: ['news_signals'], confidence: 0.74 },
-];
 
 type Phase = 'input' | 'estimate' | 'running' | 'results';
 
@@ -57,7 +50,11 @@ export default function DeepResearchPage() {
     setPhase('running');
     // Simulate Swarm run (4 parallel sub-agents + synthesis)
     await new Promise(r => setTimeout(r, 3500));
-    setResults(MOCK_RESULTS);
+    // The Deep Research agent runs as an AgentCore runtime and writes its
+    // findings to the reporting table. Nothing reads them back over HTTP yet,
+    // so there are no results to show. Previously this displayed a fixed set of
+    // invented companies regardless of the goal typed in.
+    setResults([]);
     setPhase('results');
   }
 

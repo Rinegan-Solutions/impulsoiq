@@ -19,6 +19,7 @@ type Operation =
   | 'upsert_activity'
   | 'upsert_agent_run'
   | 'upsert_campaign'
+  | 'upsert_workspace_template'
   | 'upsert_call_result'
   | 'upsert_consent_record'
   | 'check_consent'
@@ -49,14 +50,62 @@ interface WriteResponse {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// COGNITO_USER_POOLS authorizer -> verified ID-token claims as a flat string
+// map at requestContext.authorizer.claims. NOT authorizer.tenantId (that is the
+// custom-authorizer shape) and NOT authorizer.jwt.claims (HTTP API v2).
 function tenantFromEvent(event: APIGatewayProxyEvent): string | null {
-  // REST API custom authorizer puts a flat context here, not JWT claims.
-  const ctx = event.requestContext?.authorizer;
-  return (ctx?.tenantId as string | undefined) ?? null;
+  const claims = event.requestContext?.authorizer?.claims as
+    | Record<string, string>
+    | undefined;
+  return claims?.['custom:tenant_id'] ?? null;
 }
 
 function iso(d?: unknown): string {
   return d ? new Date(d as string).toISOString() : new Date().toISOString();
+}
+
+// ── Layer 2 of tenant isolation ──────────────────────────────────────────────
+// x-impulsoiq-tenant carries the workspace the caller believes it is talking
+// to; custom:tenant_id is the workspace their signed token actually belongs
+// to. They agree for a legitimate request.
+//
+// HOW FAR TO TRUST THE HEADER
+// The SPA sets it from window.location.hostname, so it is CLIENT-SUPPLIED. The
+// CloudFront function stamps the same header, but only on requests that
+// traverse the distribution — the SPA calls API Gateway directly, so today
+// that stamping applies to document requests, not API calls. Routing /api/*
+// through the same distribution would make the header origin-trusted; until
+// then it is not.
+//
+// That is fine for what this check is for. It cannot be used to READ another
+// tenant: every query below is scoped by the CLAIM, so forging the header only
+// makes your own request 403. What it prevents is the honest failure mode.
+//
+// WHY THIS MATTERS
+// Every query below is already scoped by the CLAIM, so a mismatch cannot leak
+// another tenant's rows. What it would do without this check is quietly serve
+// tenant A's data on tenant B's address: a user who follows a link to
+// b.impulsoiq... while signed in to A sees their OWN workspace under B's
+// branding and URL. That is a correctness and trust failure, and it is exactly
+// the case a URL-based workspace model has to get right.
+//
+// The header is absent for direct agent invocation and for requests that did
+// not pass through CloudFront (calling the API Gateway URL straight). Absent
+// means "no host to check", so the claim stands alone — this is a
+// cross-check, not the boundary.
+function assertTenantMatchesHost(event: APIGatewayProxyEvent, tenantId: string): string | null {
+  const headers = event.headers ?? {};
+  // Header names are case-insensitive; API Gateway does not normalise them.
+  let host = '';
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === 'x-impulsoiq-tenant') {
+      host = (headers[k] ?? '').trim();
+      break;
+    }
+  }
+  if (!host) return null;          // no host context — claim is authoritative
+  if (host === tenantId) return null;
+  return `Tenant mismatch: signed in as '${tenantId}' but requested '${host}'`;
 }
 
 // ── Operations ────────────────────────────────────────────────────────────────
@@ -199,6 +248,38 @@ async function upsertCampaign(db: ReturnType<typeof getDb> extends Promise<infer
   return res.rows[0].id as string;
 }
 
+async function upsertWorkspaceTemplate(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  // Conflict target is (tenant_id, template_key) -- the natural key -- so the
+  // caller can activate a template it has never activated before without
+  // knowing a row id.
+  //
+  // Every updatable column is COALESCE(EXCLUDED.x, workspace_template.x) so a
+  // partial payload such as {templateKey, status} preserves the name, config
+  // and legal-review fields instead of blanking them. That matters most for
+  // legal_reviewed_by/at: template-launcher REFUSES to launch
+  // accounts_receivable without them, so silently clearing them here would
+  // disable the campaign with no visible cause.
+  const res = await db.query(
+    `INSERT INTO workspace_template
+       (id, tenant_id, template_key, name, status, config,
+        legal_reviewed_by, legal_reviewed_at)
+     VALUES (COALESCE($1, gen_random_uuid()), $2, $3, COALESCE($4, $3),
+             COALESCE($5,'inactive'), COALESCE($6,'{}')::jsonb, $7, $8)
+     ON CONFLICT (tenant_id, template_key) DO UPDATE SET
+       name              = COALESCE(EXCLUDED.name,              workspace_template.name),
+       status            = COALESCE(EXCLUDED.status,            workspace_template.status),
+       config            = COALESCE(EXCLUDED.config,            workspace_template.config),
+       legal_reviewed_by = COALESCE(EXCLUDED.legal_reviewed_by, workspace_template.legal_reviewed_by),
+       legal_reviewed_at = COALESCE(EXCLUDED.legal_reviewed_at, workspace_template.legal_reviewed_at),
+       updated_at        = NOW()
+     RETURNING id`,
+    [p.id ?? null, tenantId, p.templateKey, p.name ?? null, p.status ?? null,
+     p.config ? JSON.stringify(p.config) : null,
+     p.legalReviewedBy ?? null, p.legalReviewedAt ?? null],
+  );
+  return res.rows[0].id as string;
+}
+
 async function upsertCallResult(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
   const res = await db.query(
     `INSERT INTO call_result (id, tenant_id, agent_run_id, contact_id, call_id,
@@ -272,7 +353,7 @@ async function upsertTenant(db: ReturnType<typeof getDb> extends Promise<infer T
 
 // ── Entry point (API Gateway + direct Lambda invocation from agents) ──────────
 
-export const handler: Handler<
+const dispatch: Handler<
   { operation: Operation; payload: Record<string, unknown>; tenantId?: string; actorType?: string; actorId?: string }
   | APIGatewayProxyEvent,
   unknown
@@ -288,6 +369,9 @@ export const handler: Handler<
     const apigwEvent = event as APIGatewayProxyEvent;
     tenantId = tenantFromEvent(apigwEvent);
     if (!tenantId) return { statusCode: 401, body: JSON.stringify({ error: 'Missing tenant_id' }) };
+
+    const mismatch = assertTenantMatchesHost(apigwEvent, tenantId);
+    if (mismatch) return { statusCode: 403, body: JSON.stringify({ error: mismatch }) };
     req = JSON.parse(apigwEvent.body ?? '{}') as WriteRequest;
   } else {
     // Direct agent invocation path
@@ -354,6 +438,11 @@ export const handler: Handler<
       case 'upsert_campaign':
         entityId   = await upsertCampaign(db, tenantId, payload);
         entityType = 'campaign';
+        break;
+
+      case 'upsert_workspace_template':
+        entityId   = await upsertWorkspaceTemplate(db, tenantId, payload);
+        entityType = 'workspace_template';
         break;
 
       case 'upsert_call_result':
@@ -530,4 +619,37 @@ export const handler: Handler<
     console.error('CRM write error', { operation, error: msg });
     return { ok: false, error: msg };
   }
+};
+
+// ── API Gateway proxy boundary ───────────────────────────────────────────────
+// A Lambda PROXY integration requires {statusCode, headers, body}. The write
+// operations return {ok, id} / {ok:false, error}; passed through the proxy
+// unchanged that produces a 502 with nothing useful logged. dispatch() keeps
+// its natural shape for direct agent invocation and this adapts it only when
+// the caller was API Gateway.
+//
+// An OCC_CONFLICT is returned as 409, not 500: it means "retry", and the
+// distinction matters because DSQL has no advisory locks, so callers are
+// expected to retry rather than treat it as a failure.
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'Content-Type,Authorization,x-impulsoiq-tenant',
+  'Content-Type': 'application/json',
+};
+
+function toProxyResponse(out: unknown) {
+  if (out && typeof out === 'object' && 'statusCode' in (out as object)) {
+    const r = out as { statusCode: number; body?: string; headers?: Record<string, string> };
+    return { ...r, headers: { ...CORS_HEADERS, ...r.headers } };
+  }
+  const o = (out ?? {}) as { ok?: boolean; error?: string };
+  let status = 200;
+  if (o.ok === false) status = o.error?.includes('OCC_CONFLICT') ? 409 : 500;
+  return { statusCode: status, headers: CORS_HEADERS, body: JSON.stringify(out ?? null) };
+}
+
+export const handler = async (event: unknown) => {
+  const viaApiGateway = !!event && typeof event === 'object' && 'requestContext' in (event as object);
+  const out = await (dispatch as (e: unknown) => Promise<unknown>)(event);
+  return viaApiGateway ? toProxyResponse(out) : out;
 };

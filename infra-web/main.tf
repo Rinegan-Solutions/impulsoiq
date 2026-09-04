@@ -24,7 +24,18 @@ locals {
   # Extra names served by the same distribution and covered by the same
   # certificate. Kept as a list so adding another alias is a one-line change.
   alt_fqdns = var.www_alias ? ["www.${local.fqdn}"] : []
-  all_fqdns = concat([local.fqdn], local.alt_fqdns)
+
+  # Tenant addresses. Every workspace is <slug>.<fqdn>, so ONE wildcard covers
+  # all of them and no per-tenant DNS or certificate work is needed when a
+  # workspace is created.
+  #
+  # Each environment's wildcard is distinct (*.impulsoiq..., *.dev.impulsoiq...,
+  # *.test.impulsoiq...), which is what keeps three independent Terraform states
+  # from contending over one certificate validation record — the same reason the
+  # per-environment certificates exist at all.
+  tenant_wildcard = var.tenant_subdomains ? ["*.${local.fqdn}"] : []
+
+  all_fqdns = concat([local.fqdn], local.alt_fqdns, local.tenant_wildcard)
 }
 
 resource "aws_s3_bucket" "web" {
@@ -59,19 +70,26 @@ data "aws_route53_zone" "main" {
 }
 
 # ── TLS ───────────────────────────────────────────────────────────────────────
-# One certificate per environment, scoped to that environment's exact FQDN.
+# One certificate per environment, covering that environment's own names:
+# its FQDN, optionally www, and its own tenant wildcard.
 #
-# Deliberately NOT a shared "*.impulsoiq.rinegansolutions.com" wildcard: a
-# wildcard produces one validation record name for all three environments, so
-# dev, test and prod — which run in separate states — would each try to own the
-# same Route53 record. Per-environment certs give each a distinct validation
-# record and remove the contention entirely.
+# There is deliberately no SHARED wildcard across environments. A single
+# *.impulsoiq.rinegansolutions.com certificate would produce one validation
+# record name, and dev, test and prod run in separate Terraform states — all
+# three would contend for the same Route53 record. Per-environment certificates
+# give each a distinct validation record and remove the contention.
+#
+# The per-environment wildcards do not overlap either: *.impulsoiq... (prod),
+# *.dev.impulsoiq... and *.test.impulsoiq... are three different names. Note a
+# wildcard matches exactly ONE label, so *.impulsoiq... does not cover
+# acme.dev.impulsoiq... — which is what keeps prod's certificate from being
+# usable for a non-prod host.
 resource "aws_acm_certificate" "web" {
   provider = aws.us_east_1
   # The apex is the primary name; www (when enabled) rides along as a SAN so
   # both are served by one certificate and one distribution.
   domain_name               = local.fqdn
-  subject_alternative_names = local.alt_fqdns
+  subject_alternative_names = concat(local.alt_fqdns, local.tenant_wildcard)
   validation_method         = "DNS"
 
   lifecycle {
@@ -82,19 +100,28 @@ resource "aws_acm_certificate" "web" {
 }
 
 # ACM publishes the CNAME it wants to see; we write it into the zone.
+# ACM emits ONE validation option per name on the certificate, but a wildcard
+# and its base domain share the same validation record: *.example.com and
+# example.com both validate via _x.example.com. Keying this map on
+# dvo.domain_name therefore produces two entries writing the SAME Route53
+# record, which is a duplicate-resource conflict. Keying on the record NAME
+# collapses them to one, which is what ACM actually expects.
 resource "aws_route53_record" "cert_validation" {
   for_each = {
-    for dvo in aws_acm_certificate.web.domain_validation_options : dvo.domain_name => {
+    for dvo in aws_acm_certificate.web.domain_validation_options :
+    dvo.resource_record_name => {
       name   = dvo.resource_record_name
       record = dvo.resource_record_value
       type   = dvo.resource_record_type
-    }
+    }...
   }
 
-  zone_id         = data.aws_route53_zone.main.zone_id
-  name            = each.value.name
-  type            = each.value.type
-  records         = [each.value.record]
+  zone_id = data.aws_route53_zone.main.zone_id
+  name    = each.key
+  type    = each.value[0].type
+  # distinct() because the collapsed group may legitimately contain the same
+  # value twice (wildcard + base); ACM accepts a single record either way.
+  records         = distinct([for v in each.value : v.record])
   ttl             = 60
   allow_overwrite = true
 }
@@ -106,6 +133,23 @@ resource "aws_acm_certificate_validation" "web" {
   provider                = aws.us_east_1
   certificate_arn         = aws_acm_certificate.web.arn
   validation_record_fqdns = [for r in aws_route53_record.cert_validation : r.fqdn]
+}
+
+# ── Tenant routing function ───────────────────────────────────────────────────
+# The zone is injected rather than hardcoded so the same source file behaves
+# correctly in every environment: in prod a tenant is <slug>.impulsoiq...,
+# in dev it is <slug>.dev.impulsoiq...
+resource "aws_cloudfront_function" "tenant_router" {
+  count = var.tenant_subdomains ? 1 : 0
+
+  name    = "${local.project}-tenant-router-${var.env}"
+  runtime = "cloudfront-js-2.0"
+  comment = "Resolves <slug>.${local.fqdn} to a tenant and rejects reserved or malformed workspace hosts"
+  publish = true
+
+  code = templatefile("${path.module}/functions/tenant-router.js", {
+    zone = local.fqdn
+  })
 }
 
 resource "aws_cloudfront_distribution" "web" {
@@ -129,6 +173,18 @@ resource "aws_cloudfront_distribution" "web" {
       query_string = false
       cookies {
         forward = "none"
+      }
+    }
+
+    # Layer 1 of tenant isolation. viewer-request runs on EVERY request,
+    # including cache hits, which is what makes it safe to reject unknown
+    # workspaces here — a cached 200 for one host can never be served to a host
+    # the function would have rejected.
+    dynamic "function_association" {
+      for_each = var.tenant_subdomains ? [1] : []
+      content {
+        event_type   = "viewer-request"
+        function_arn = aws_cloudfront_function.tenant_router[0].arn
       }
     }
   }

@@ -1,191 +1,189 @@
+/**
+ * The ImpulsoIQ API client.
+ *
+ * Every call goes to the real API Gateway stage (VITE_API_URL) with the
+ * Cognito ID token attached. See ./http.ts for why the operation envelope
+ * exists rather than REST resources.
+ *
+ * WHAT IS AND IS NOT BACKED
+ * crm-read only implements the operations the agents needed, plus the three
+ * list operations added for these screens. Anything without a backing
+ * operation is absent from this file on purpose — a stub returning [] would
+ * look identical to an empty tenant and hide the gap. Screens for unbacked
+ * features render an explicit empty state instead.
+ */
 import { z } from 'zod';
+import { operation, request } from './http';
 import {
-  ContactSchema, CampaignSchema, AgentRunSchema, DealSchema,
-  DashboardStatsSchema, PaginatedSchema,
+  ContactSchema,
+  CampaignSchema,
+  AgentRunSchema,
+  DealSchema,
+  PipelineDealSchema,
+  DashboardStatsSchema,
+  RegistryEntrySchema,
+  KnowledgeArticleSchema,
+  TemplateActivationSchema,
+  OrgCheckSchema,
+  PaginatedSchema,
   type Contact,
+  type Deal,
+  type Campaign,
+  type AgentRun,
 } from './schemas';
 
-const BASE = '/api';
+const OkSchema = z.object({ ok: z.boolean().optional(), id: z.string().optional() }).passthrough();
 
-// ─── Typed fetch — validates every response through Zod ─────────────────────
-
-class ApiError extends Error {
-  constructor(public status: number, message: string) { super(message); }
-}
-
-async function fetched<T>(schema: z.ZodType<T>, path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
-    ...init,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new ApiError(res.status, text);
-  }
-  const json = await res.json();
-  // Zod parse validates shape — throws ZodError if API returns unexpected structure
-  return schema.parse(json);
-}
-
-// ─── Contacts ────────────────────────────────────────────────────────────────
+// ─── Contacts ─────────────────────────────────────────────────────────────────
 
 export const contactsApi = {
   list: (page = 1, pageSize = 20, search = '') =>
-    fetched(
-      PaginatedSchema(ContactSchema),
-      `/contacts?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}`,
-    ),
+    operation('/crm-read', 'list_contacts', { page, pageSize, search },
+      PaginatedSchema(ContactSchema)),
 
-  get: (id: string) => fetched(ContactSchema, `/contacts/${id}`),
+  get: (id: string) =>
+    operation('/crm-read', 'get_contact', { id }, ContactSchema.nullable()),
 
+  // Writes go through crm-write-service only — never straight to DSQL.
   create: (body: Partial<Contact>) =>
-    fetched(ContactSchema, '/contacts', { method: 'POST', body: JSON.stringify(body) }),
+    operation('/crm-write', 'upsert_contact', body as Record<string, unknown>, OkSchema),
 
   update: (id: string, body: Partial<Contact>) =>
-    fetched(ContactSchema, `/contacts/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
-
-  delete: (id: string) => fetched(z.object({ ok: z.boolean() }), `/contacts/${id}`, { method: 'DELETE' }),
+    operation('/crm-write', 'upsert_contact', { id, ...body }, OkSchema),
 };
 
-// ─── Campaigns ───────────────────────────────────────────────────────────────
+// ─── Campaigns ────────────────────────────────────────────────────────────────
 
 export const campaignsApi = {
-  list: () => fetched(PaginatedSchema(CampaignSchema), '/campaigns'),
-  get:  (id: string) => fetched(CampaignSchema, `/campaigns/${id}`),
-  pause:  (id: string) => fetched(CampaignSchema, `/campaigns/${id}/pause`, { method: 'POST' }),
-  resume: (id: string) => fetched(CampaignSchema, `/campaigns/${id}/resume`, { method: 'POST' }),
+  // list_campaigns returns every campaign with its aggregates.
+  // get_active_campaigns (used by the agents) returns only active ones and no
+  // metrics, so it is the wrong read for a management screen.
+  list: () =>
+    operation('/crm-read', 'list_campaigns', {}, z.array(CampaignSchema)),
+
+  // Takes the WHOLE campaign, not just {id, status}. upsert_campaign is a real
+  // upsert: its ON CONFLICT sets name = EXCLUDED.name, so a partial payload
+  // would write NULL into a NOT NULL column. The agents always send full
+  // objects, which is why this never surfaced before the UI could write.
+  setStatus: (campaign: Campaign, status: 'active' | 'paused') =>
+    operation('/crm-write', 'upsert_campaign',
+      { ...campaign, status } as unknown as Record<string, unknown>, OkSchema),
 };
 
-// ─── Agent Runs ──────────────────────────────────────────────────────────────
+// ─── Agent runs ───────────────────────────────────────────────────────────────
 
 export const agentRunsApi = {
   list: (page = 1, pageSize = 20) =>
-    fetched(PaginatedSchema(AgentRunSchema), `/agent-runs?page=${page}&pageSize=${pageSize}`),
-  pause:  (id: string) => fetched(AgentRunSchema, `/agent-runs/${id}/pause`,  { method: 'POST' }),
-  resume: (id: string) => fetched(AgentRunSchema, `/agent-runs/${id}/resume`, { method: 'POST' }),
-  kill:   (id: string) => fetched(AgentRunSchema, `/agent-runs/${id}/kill`,   { method: 'POST' }),
+    operation('/crm-read', 'list_agent_runs', { page, pageSize },
+      PaginatedSchema(AgentRunSchema)),
+
+  // Pause/resume/kill are status transitions on the run record. The Step
+  // Functions execution is driven separately by the backend.
+  // Full row again: agent_run.contact_id and agent_type are NOT NULL, and the
+  // proposed tuple is validated before ON CONFLICT is even considered, so a
+  // partial {id, status} fails on the constraint rather than updating.
+  setStatus: (run: AgentRun, status: 'running' | 'paused' | 'failed') =>
+    operation('/crm-write', 'upsert_agent_run',
+      { ...run, status } as unknown as Record<string, unknown>, OkSchema),
 };
 
-// ─── Deals ───────────────────────────────────────────────────────────────────
+// ─── Deals ────────────────────────────────────────────────────────────────────
 
 export const dealsApi = {
-  list: () => fetched(PaginatedSchema(DealSchema), '/deals'),
-  update: (id: string, body: Partial<z.infer<typeof DealSchema>>) =>
-    fetched(DealSchema, `/deals/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  list: (page = 1, pageSize = 50) =>
+    operation('/crm-read', 'list_deals', { page, pageSize }, PaginatedSchema(DealSchema)),
+
+  // The forecasting view: open deals only, with activity aggregates.
+  pipeline: (lookbackDays = 90) =>
+    operation('/crm-read', 'get_pipeline_data', { lookbackDays },
+      z.array(PipelineDealSchema)),
+
+  update: (id: string, body: Partial<Deal>) =>
+    operation('/crm-write', 'upsert_deal', { id, ...body }, OkSchema),
 };
 
-// ─── Registry (Phase 6B) ─────────────────────────────────────────────────────
+// ─── Dashboard ────────────────────────────────────────────────────────────────
+
+export const dashboardApi = {
+  stats: () => operation('/crm-read', 'get_dashboard_stats', {}, DashboardStatsSchema),
+};
+
+// ─── Registry (Phase 6B) ──────────────────────────────────────────────────────
 
 export const registryApi = {
   list: (entryType?: string) =>
-    fetched(z.array(z.object({
-      entry_type:       z.string(),
-      key:              z.string(),
-      name:             z.string(),
-      description:      z.string(),
-      version:          z.string(),
-      capabilities:     z.array(z.string()),
-      phase_introduced: z.string(),
-      status:           z.string(),
-      metadata:         z.record(z.string(), z.unknown()),
-    })), `/registry${entryType ? `?type=${entryType}` : ''}`),
+    operation('/crm-read', 'get_registry', entryType ? { entryType } : {},
+      z.array(RegistryEntrySchema)),
 };
 
-// ─── Workspace Templates (Phase 5) ──────────────────────────────────────────
-
-const TemplateActivationSchema = z.object({
-  id:                 z.string(),
-  templateKey:        z.string(),
-  name:               z.string(),
-  status:             z.enum(['active', 'inactive', 'pending_review']),
-  config:             z.record(z.string(), z.unknown()),
-  legalReviewedBy:    z.string().nullable().optional(),
-  legalReviewedAt:    z.string().nullable().optional(),
-  createdAt:          z.string(),
-});
+// ─── Workspace templates (Phase 5) ────────────────────────────────────────────
 
 export const templatesApi = {
-  list:     () => fetched(z.array(TemplateActivationSchema), '/workspace-templates'),
-  activate: (templateKey: string) =>
-    fetched(TemplateActivationSchema, `/workspace-templates/${templateKey}/activate`, { method: 'POST' }),
-  deactivate: (templateKey: string) =>
-    fetched(TemplateActivationSchema, `/workspace-templates/${templateKey}/deactivate`, { method: 'POST' }),
+  list: () =>
+    operation('/crm-read', 'get_workspace_templates', {},
+      z.array(TemplateActivationSchema)),
+
+  // Conflict target is (tenant_id, template_key), so activating a template the
+  // tenant has never activated before works without knowing a row id.
+  setStatus: (templateKey: string, status: 'active' | 'inactive') =>
+    operation('/crm-write', 'upsert_workspace_template', { templateKey, status }, OkSchema),
+
+  // template-launcher is its own Lambda: it starts Step Functions executions
+  // and enforces the accounts_receivable legal-review gate.
   launch: (templateKey: string, body: { targetIds: string[]; contextData?: Record<string, unknown> }) =>
-    fetched(z.object({ started: z.number(), skipped: z.number(), template: z.string() }),
-      `/workspace-templates/${templateKey}/launch`, { method: 'POST', body: JSON.stringify(body) }),
+    request('/templates',
+      z.object({
+        started: z.number(),
+        skipped: z.number(),
+        template: z.string(),
+        executions: z.array(z.string()),
+      }),
+      { method: 'POST', body: JSON.stringify({ templateKey, ...body }) }),
 };
 
-// ─── Reporting (Phase 3) ─────────────────────────────────────────────────────
+// ─── Support (Phase 7/8) ──────────────────────────────────────────────────────
 
-const ForecastReportSchema = z.object({
-  forecast:    z.object({
-    totalPipeline:    z.number(),
-    weightedForecast: z.number(),
-    dealCount:        z.number(),
-    period:           z.string(),
-    byStage:          z.record(z.string(), z.object({ count: z.number(), totalAmount: z.number(), weightedAmount: z.number() })),
-  }),
-  riskFlags:   z.array(z.object({
-    dealId:       z.string(),
-    dealName:     z.string(),
-    stage:        z.string(),
-    amount:       z.number(),
-    daysQuiet:    z.number(),
-    teamMedian:   z.number(),
-    xAboveMedian: z.number(),
-  })),
-  narratives:  z.array(z.string()),
-  generatedAt: z.string(),
-  period:      z.string(),
-});
+export const supportApi = {
+  listQueues: () =>
+    operation('/crm-read', 'list_queues', {}, z.array(z.record(z.string(), z.unknown()))),
 
-const MeteringUsageSchema = z.object({
-  period: z.string(),
-  usage: z.array(z.object({
-    resource:   z.string(),
-    used:       z.number(),
-    quota:      z.number(),
-    costUsd:    z.number(),
-  })),
-});
+  getConversation: (id: string) =>
+    operation('/crm-read', 'get_conversation', { id },
+      z.record(z.string(), z.unknown()).nullable()),
 
-export const reportingApi = {
-  getForecast:    () => fetched(ForecastReportSchema, '/reporting/forecast'),
-  getMeteringUsage: () => fetched(MeteringUsageSchema, '/reporting/metering'),
+  getMessages: (conversationId: string, limit = 50) =>
+    operation('/crm-read', 'get_messages', { conversationId, limit },
+      z.array(z.record(z.string(), z.unknown()))),
 };
 
-// ─── Analytics ───────────────────────────────────────────────────────────────
+// ─── Knowledge base (Phase 8A) ────────────────────────────────────────────────
 
-const AnalyticsSchema = z.object({
-  replyRateTrend:  z.array(z.number()),
-  meetingsTrend:   z.array(z.number()),
-  callOutcomes:    z.object({ answered: z.number(), voicemail: z.number(), noAnswer: z.number(), busy: z.number() }),
-  topSequences:    z.array(z.object({ name: z.string(), replies: z.number(), meetings: z.number(), rate: z.number() })),
-  contactsAdded:   z.array(z.number()),
-  months:          z.array(z.string()),
-});
+export const knowledgeApi = {
+  // The agent's default limit is 5 and status defaults to 'published'; a browse
+  // screen wants more than that and needs drafts too, so both are explicit.
+  search: (query = '', status?: string, limit = 100) =>
+    operation('/crm-read', 'search_knowledge_articles',
+      { query, ...(status ? { status } : {}), limit },
+      z.array(KnowledgeArticleSchema)),
 
-export const analyticsApi = {
-  get: () => fetched(AnalyticsSchema, '/analytics'),
+  get: (id: string) =>
+    operation('/crm-read', 'get_knowledge_article', { id },
+      z.record(z.string(), z.unknown()).nullable()),
 };
 
-// ─── Org check (unauthenticated) ─────────────────────────────────────────────
+// ─── Support insight (Phase 9A) ───────────────────────────────────────────────
 
-const OrgCheckSchema = z.object({
-  tenants: z.array(z.object({
-    id:        z.string(),
-    name:      z.string(),
-    subdomain: z.string(),
-  })),
-});
+export const supportInsightApi = {
+  metrics: (periodDays = 30) =>
+    operation('/crm-read', 'get_support_metrics', { periodDays },
+      z.record(z.string(), z.unknown())),
+};
+
+// ─── Org check (public — called before the user has an account) ───────────────
 
 export const orgCheckApi = {
   byDomain: (domain: string) =>
-    fetched(OrgCheckSchema, `/org-check?domain=${encodeURIComponent(domain)}`),
+    request(`/org-check?domain=${encodeURIComponent(domain)}`, OrgCheckSchema),
 };
 
-// ─── Dashboard ───────────────────────────────────────────────────────────────
-
-export const dashboardApi = {
-  stats: () => fetched(DashboardStatsSchema, '/dashboard/stats'),
-};
+export { ApiError } from './http';

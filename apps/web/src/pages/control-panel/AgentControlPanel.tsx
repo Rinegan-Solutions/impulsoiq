@@ -42,12 +42,16 @@ const STATUS_CLS: Record<AgentRun['status'], string> = {
 const STATUS_DOT: Record<AgentRun['status'], string> = {
   running:'bg-emerald-500 animate-pulse', paused:'bg-amber-500', completed:'bg-indigo-500', pending:'bg-slate-400', failed:'bg-red-500',
 };
+// Keys must match agent_run.agent_type's CHECK constraint in schema.sql.
+// They previously used invented short names (research/crm/coord) that the
+// database can never emit, so every badge fell through to undefined.
 const AGENT_CLS: Record<AgentRun['agentType'], string> = {
-  research: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300',
-  outreach: 'bg-cyan-100 text-cyan-700 dark:bg-cyan-500/15 dark:text-cyan-300',
-  voice:    'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
-  crm:      'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
-  coord:    'bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300',
+  research_enrichment: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300',
+  outreach:      'bg-cyan-100 text-cyan-700 dark:bg-cyan-500/15 dark:text-cyan-300',
+  voice:         'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
+  nurture:       'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
+  clarification: 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300',
+  coordinator:   'bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300',
 };
 
 export default function AgentControlPanel() {
@@ -86,11 +90,11 @@ export default function AgentControlPanel() {
 
   async function handleAction(run: AgentRun, action: 'pause'|'resume'|'kill') {
     try {
-      const updated =
-        action === 'pause'  ? await agentRunsApi.pause(run.id)  :
-        action === 'resume' ? await agentRunsApi.resume(run.id) :
-        await agentRunsApi.kill(run.id);
-      setRuns(prev => prev.map(r => r.id === updated.id ? updated : r));
+      // These are status transitions on agent_run. crm-write answers {ok, id},
+      // not the updated row, so refresh from the server instead of guessing.
+      const status = action === 'pause' ? 'paused' : action === 'resume' ? 'running' : 'failed';
+      await agentRunsApi.setStatus(run, status);
+      await loadRuns();
     } catch { /* error */ }
   }
 
@@ -153,8 +157,12 @@ export default function AgentControlPanel() {
                       className="grid px-4 py-3 border-b border-slate-50 dark:border-white/[0.03] last:border-0 items-center text-[0.8rem] hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors group"
                       style={{ gridTemplateColumns: '1fr 80px 80px 80px 100px' }}>
                       <div className="min-w-0">
-                        <p className="font-semibold text-slate-800 dark:text-slate-200 truncate">{r.contactName}</p>
-                        <p className="text-[0.7rem] text-slate-400 dark:text-slate-600 truncate">{r.company}</p>
+                        {/* first/last name are joined from `contact` by
+                            list_agent_runs. There is no company on this row. */}
+                        <p className="font-semibold text-slate-800 dark:text-slate-200 truncate">
+                          {[r.firstName, r.lastName].filter(Boolean).join(' ') || 'Unknown contact'}
+                        </p>
+                        <p className="text-[0.7rem] text-slate-400 dark:text-slate-600 truncate">{r.agentType}</p>
                       </div>
                       <span className={cn('inline-flex items-center gap-1.5 text-[0.63rem] font-bold px-1.5 py-0.5 rounded-lg w-fit', STATUS_CLS[r.status])}>
                         <span className={cn('w-1.5 h-1.5 rounded-full', STATUS_DOT[r.status])} />

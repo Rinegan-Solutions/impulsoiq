@@ -40,17 +40,16 @@ interface Ticket {
   createdAt:        string;
 }
 
-// ── Mock data ─────────────────────────────────────────────────────────────────
-
-const MOCK_TICKETS: Ticket[] = [
-  { id: 't1', conversationId: 'c1', tier: 3, priority: 'urgent', slaTargetAt: new Date(Date.now() - 3_600_000).toISOString(), contactName: 'Sarah Chen', queueName: 'Escalations', lastMessage: 'I need a refund immediately — this is completely unacceptable', channel: 'email', status: 'open', createdAt: new Date(Date.now() - 7_200_000).toISOString() },
-  { id: 't2', conversationId: 'c2', tier: 1, priority: 'high',   slaTargetAt: new Date(Date.now() + 1_800_000).toISOString(), contactName: 'Marcus Webb', queueName: 'General', lastMessage: 'How do I set up the outreach sequence for a new campaign?', channel: 'chat', status: 'open', createdAt: new Date(Date.now() - 1_800_000).toISOString() },
-  { id: 't3', conversationId: 'c3', tier: 0, priority: 'normal', slaTargetAt: new Date(Date.now() + 3_600_000).toISOString(), contactName: 'Priya Nair', queueName: 'General', lastMessage: 'Where can I download my invoice for September?', channel: 'sms', status: 'open', createdAt: new Date(Date.now() - 900_000).toISOString() },
-  { id: 't4', conversationId: 'c4', tier: 2, priority: 'high',   slaTargetAt: new Date(Date.now() + 600_000).toISOString(),  contactName: 'Jordan Lee', queueName: 'Billing', lastMessage: 'I was charged twice this month — please review my account', channel: 'voice', status: 'open', createdAt: new Date(Date.now() - 3_000_000).toISOString() },
-  { id: 't5', conversationId: 'c5', tier: 1, priority: 'normal', slaTargetAt: new Date(Date.now() + 5_400_000).toISOString(), contactName: 'Amara Mensah', queueName: 'General', lastMessage: 'Can you explain the difference between Growth and Enterprise plans?', channel: 'email', status: 'pending', createdAt: new Date(Date.now() - 600_000).toISOString() },
-];
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// The eight fixture tickets that lived here are gone.
+//
+// crm-read has no list_tickets operation -- it implements get_conversation,
+// get_messages, list_queues and count_prior_tickets for the Triage and
+// Resolution agents, but nothing that returns a tenant's ticket queue. The page
+// below is left fully working (filters, SLA countdown) against an empty list
+// rather than showing tickets that do not exist.
+//
+// To make this live: add list_tickets to crm-read (join ticket -> conversation
+// -> contact, ordered by sla_target_at) and fetch it here.
 
 const TIER_CONFIG = {
   0: { label: 'Auto', cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400' },
@@ -99,14 +98,14 @@ const ease = [0.22, 1, 0.36, 1] as const;
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function SupportQueuePage() {
-  const [tickets, setTickets]           = useState<Ticket[]>(MOCK_TICKETS);
+  const [tickets, setTickets]           = useState<Ticket[]>([]);
   const [selected, setSelected]         = useState<Ticket | null>(null);
   const [repStatus, setRepStatus]       = useState<'available' | 'busy' | 'offline'>('available');
   const [queueFilter, setQueueFilter]   = useState<'all' | string>('all');
 
   // Same ticking clock the SLA badges use, so the breach count stays in step.
   const now     = useNow(30_000);
-  const queues  = [...new Set(MOCK_TICKETS.map(t => t.queueName))];
+  const queues  = [...new Set(tickets.map(t => t.queueName))];
   const filtered = queueFilter === 'all' ? tickets : tickets.filter(t => t.queueName === queueFilter);
 
   const breachedCount = tickets.filter(t => t.slaBreachedAt || new Date(t.slaTargetAt).getTime() < now).length;

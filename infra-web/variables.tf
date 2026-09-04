@@ -38,3 +38,17 @@ variable "route53_zone_name" {
   description = "Hosted zone that serves the app FQDNs. Created once as a bootstrap resource and shared by dev/test/prod; Terraform only reads it."
   default     = "impulsoiq.rinegansolutions.com"
 }
+
+variable "tenant_subdomains" {
+  type        = bool
+  description = <<-EOT
+    Serve per-tenant addresses at <slug>.<fqdn>.
+
+    Turning this on adds three things that only make sense together: a wildcard
+    SAN on the certificate, a wildcard A/AAAA record, and the CloudFront
+    function that resolves the host label to a tenant slug. It is a variable
+    rather than always-on so a non-prod environment can be brought up without
+    waiting on wildcard certificate validation.
+  EOT
+  default     = true
+}

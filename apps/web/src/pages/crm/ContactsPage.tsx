@@ -155,7 +155,7 @@ export default function ContactsPage() {
                     <p className="text-[0.72rem] text-slate-400 dark:text-slate-600 truncate">{c.email}</p>
                   </div>
                 </div>
-                <span className="text-slate-600 dark:text-slate-400 truncate">{c.company}</span>
+                <span className="text-slate-600 dark:text-slate-400 truncate">{c.accountName ?? '—'}</span>
                 <span className="text-slate-500 dark:text-slate-500 truncate">{c.title}</span>
                 <span className="text-center">
                   {c.stage && <span className={cn('text-[0.65rem] font-semibold px-2 py-0.5 rounded-lg', STAGE_CLS[c.stage])}>{c.stage}</span>}
@@ -163,7 +163,7 @@ export default function ContactsPage() {
                 <span className="text-center">
                   {c.score != null && <span className={cn('text-[0.7rem] font-bold px-1.5 py-0.5 rounded-md', scoreBadge(c.score))}>{c.score}</span>}
                 </span>
-                <span className="text-[0.72rem] text-slate-400 dark:text-slate-600">{timeAgo(c.lastActivity)}</span>
+                <span className="text-[0.72rem] text-slate-400 dark:text-slate-600">{timeAgo(c.lastActivityAt ?? undefined)}</span>
                 <button className="opacity-0 group-hover:opacity-100 w-7 h-7 flex items-center justify-center rounded-lg hover:bg-slate-100 dark:hover:bg-white/[0.07] text-slate-400 transition-all ml-auto">
                   <MoreHorizontal size={13} />
                 </button>

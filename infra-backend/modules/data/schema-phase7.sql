@@ -16,7 +16,7 @@
 -- ── SLA policy ────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS sla_policy (
   id                            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id                     UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id                     TEXT        NOT NULL REFERENCES tenant(id),
   name                          TEXT        NOT NULL,
   first_response_target_minutes INTEGER     NOT NULL DEFAULT 60,
   resolution_target_minutes     INTEGER     NOT NULL DEFAULT 480,
@@ -28,7 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_sla_policy_tenant ON sla_policy(tenant_id);
 -- ── Support queue ─────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS support_queue (
   id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id       UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id       TEXT        NOT NULL REFERENCES tenant(id),
   name            TEXT        NOT NULL,
   required_skills JSONB       NOT NULL DEFAULT '[]',
   sla_policy_id   UUID        REFERENCES sla_policy(id),
@@ -39,7 +39,7 @@ CREATE INDEX IF NOT EXISTS idx_support_queue_tenant ON support_queue(tenant_id);
 -- ── Conversation ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS conversation (
   id                 UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id          UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id          TEXT        NOT NULL REFERENCES tenant(id),
   contact_id         UUID        REFERENCES contact(id),
   channel_history    JSONB       NOT NULL DEFAULT '[]',
   status             TEXT        NOT NULL DEFAULT 'open'
@@ -58,7 +58,7 @@ CREATE INDEX IF NOT EXISTS idx_conversation_status  ON conversation(tenant_id, s
 -- ── Message ───────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS message (
   id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id         UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id         TEXT        NOT NULL REFERENCES tenant(id),
   conversation_id   UUID        NOT NULL REFERENCES conversation(id),
   channel           TEXT        NOT NULL
                       CHECK (channel IN ('email','chat','sms','voice','social')),
@@ -80,7 +80,7 @@ CREATE INDEX IF NOT EXISTS idx_message_tenant       ON message(tenant_id, create
 -- never left to agent discretion. (v4 §7C)
 CREATE TABLE IF NOT EXISTS ticket (
   id                       UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id                UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id                TEXT        NOT NULL REFERENCES tenant(id),
   conversation_id          UUID        NOT NULL UNIQUE REFERENCES conversation(id),
   queue_id                 UUID        REFERENCES support_queue(id),
   tier                     INTEGER     NOT NULL DEFAULT 1 CHECK (tier IN (0,1,2,3)),
@@ -103,7 +103,7 @@ CREATE INDEX IF NOT EXISTS idx_ticket_sla    ON ticket(tenant_id, sla_target_at)
 -- ── Rep status ────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS rep_status (
   rep_id                  TEXT        NOT NULL,
-  tenant_id               UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id               TEXT        NOT NULL REFERENCES tenant(id),
   status                  TEXT        NOT NULL DEFAULT 'offline'
                             CHECK (status IN ('available','busy','offline')),
   concurrent_ticket_count INTEGER     NOT NULL DEFAULT 0,
@@ -115,7 +115,7 @@ CREATE INDEX IF NOT EXISTS idx_rep_status_tenant ON rep_status(tenant_id, status
 -- ── Macro ─────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS macro (
   id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id     UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id     TEXT        NOT NULL REFERENCES tenant(id),
   title         TEXT        NOT NULL,
   body_template TEXT        NOT NULL,
   tags          JSONB       NOT NULL DEFAULT '[]',
@@ -131,7 +131,7 @@ CREATE INDEX IF NOT EXISTS idx_macro_tenant ON macro(tenant_id);
 -- Agent in Phase 8 for grounded citation-backed answers.
 CREATE TABLE IF NOT EXISTS knowledge_article (
   id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id        UUID        NOT NULL REFERENCES tenant(id),
+  tenant_id        TEXT        NOT NULL REFERENCES tenant(id),
   title            TEXT        NOT NULL,
   body             TEXT        NOT NULL,
   status           TEXT        NOT NULL DEFAULT 'draft'

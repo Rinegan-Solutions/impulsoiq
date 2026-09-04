@@ -118,3 +118,10 @@ variable "agent_invoker_lambda_arn" {
   type        = string
   description = "ARN of the agent-invoker Lambda that calls AgentCore InvokeAgentRuntime"
 }
+
+# Every Lambda ARN, keyed by function name. rest-api.tf looks up the eight
+# HTTP-facing functions here rather than taking eight separate variables.
+variable "lambda_function_arns" {
+  type        = map(string)
+  description = "Map of function name -> ARN, from module.lambda.function_arns"
+}

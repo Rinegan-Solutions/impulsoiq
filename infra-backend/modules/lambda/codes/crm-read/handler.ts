@@ -36,6 +36,15 @@ type Operation =
   | 'list_available_reps'       // Phase 7: reps with available status
   | 'count_prior_tickets'       // Phase 7/8: prior ticket count for contact
   | 'get_support_metrics'       // Phase 9A: raw support data for insight agent
+  // ── UI list operations ──────────────────────────────────────────────────────
+  // The agents only ever fetch one record at a time, so the SPA had nothing to
+  // call for its table views. These are paginated deliberately: a tenant's
+  // contact list is unbounded and the browser must not pull all of it.
+  | 'list_contacts'
+  | 'list_agent_runs'
+  | 'list_deals'
+  | 'list_campaigns'
+  | 'get_dashboard_stats'
   | 'get_support_signals_for_contact'; // Phase 9D: support signals for renewal risk
 
 interface ReadRequest {
@@ -51,12 +60,62 @@ interface ReadResponse {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-// The REST API's custom authorizer (auth-authorizer) returns a FLAT context
-// map — { tenantId, userId, groups, isAdmin } — not an HTTP-API JWT claims
-// object. There is no `.jwt.claims` here.
+// The API uses a COGNITO_USER_POOLS authorizer, which puts the verified ID-token
+// claims at requestContext.authorizer.claims as a FLAT map of strings.
+// Three shapes exist and only one is right here:
+//   REST + Cognito authorizer  -> authorizer.claims['custom:tenant_id']  <-- this
+//   REST + custom authorizer   -> authorizer.tenantId       (flat context)
+//   HTTP API (v2) + JWT        -> authorizer.jwt.claims[...]
+// Reading the wrong one yields undefined and every request 401s.
 function tenantFromEvent(event: APIGatewayProxyEvent): string | null {
-  const ctx = event.requestContext?.authorizer;
-  return (ctx?.tenantId as string | undefined) ?? null;
+  const claims = event.requestContext?.authorizer?.claims as
+    | Record<string, string>
+    | undefined;
+  return claims?.['custom:tenant_id'] ?? null;
+}
+
+// ── Layer 2 of tenant isolation ──────────────────────────────────────────────
+// x-impulsoiq-tenant carries the workspace the caller believes it is talking
+// to; custom:tenant_id is the workspace their signed token actually belongs
+// to. They agree for a legitimate request.
+//
+// HOW FAR TO TRUST THE HEADER
+// The SPA sets it from window.location.hostname, so it is CLIENT-SUPPLIED. The
+// CloudFront function stamps the same header, but only on requests that
+// traverse the distribution — the SPA calls API Gateway directly, so today
+// that stamping applies to document requests, not API calls. Routing /api/*
+// through the same distribution would make the header origin-trusted; until
+// then it is not.
+//
+// That is fine for what this check is for. It cannot be used to READ another
+// tenant: every query below is scoped by the CLAIM, so forging the header only
+// makes your own request 403. What it prevents is the honest failure mode.
+//
+// WHY THIS MATTERS
+// Every query below is already scoped by the CLAIM, so a mismatch cannot leak
+// another tenant's rows. What it would do without this check is quietly serve
+// tenant A's data on tenant B's address: a user who follows a link to
+// b.impulsoiq... while signed in to A sees their OWN workspace under B's
+// branding and URL. That is a correctness and trust failure, and it is exactly
+// the case a URL-based workspace model has to get right.
+//
+// The header is absent for direct agent invocation and for requests that did
+// not pass through CloudFront (calling the API Gateway URL straight). Absent
+// means "no host to check", so the claim stands alone — this is a
+// cross-check, not the boundary.
+function assertTenantMatchesHost(event: APIGatewayProxyEvent, tenantId: string): string | null {
+  const headers = event.headers ?? {};
+  // Header names are case-insensitive; API Gateway does not normalise them.
+  let host = '';
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === 'x-impulsoiq-tenant') {
+      host = (headers[k] ?? '').trim();
+      break;
+    }
+  }
+  if (!host) return null;          // no host context — claim is authoritative
+  if (host === tenantId) return null;
+  return `Tenant mismatch: signed in as '${tenantId}' but requested '${host}'`;
 }
 
 // ── Operations ────────────────────────────────────────────────────────────────
@@ -133,7 +192,7 @@ async function getActiveCampaigns(db: Awaited<ReturnType<typeof getDb>>, tenantI
 
 // ── Entry point (API Gateway + direct Lambda invocation from agents) ──────────
 
-export const handler: Handler<
+const dispatch: Handler<
   { operation: Operation; payload: Record<string, unknown>; tenantId?: string }
   | APIGatewayProxyEvent,
   unknown
@@ -146,6 +205,9 @@ export const handler: Handler<
     const apigwEvent = event as APIGatewayProxyEvent;
     tenantId = tenantFromEvent(apigwEvent);
     if (!tenantId) return { statusCode: 401, body: JSON.stringify({ error: 'Missing tenant_id' }) };
+
+    const mismatch = assertTenantMatchesHost(apigwEvent, tenantId);
+    if (mismatch) return { statusCode: 403, body: JSON.stringify({ error: mismatch }) };
     req = JSON.parse(apigwEvent.body ?? '{}') as ReadRequest;
   } else {
     // Direct agent invocation path
@@ -445,6 +507,150 @@ export const handler: Handler<
         return { result: [] };
       }
 
+      // ── UI list operations ───────────────────────────────────────────────
+
+      case 'list_contacts': {
+        const page = Math.max(1, Number(payload.page ?? 1));
+        const pageSize = Math.min(100, Math.max(1, Number(payload.pageSize ?? 20)));
+        const search = String(payload.search ?? '').trim();
+
+        // Search terms go in as a PARAMETER, never interpolated into the SQL.
+        const params: unknown[] = [tenantId];
+        let where = 'WHERE c.tenant_id = $1';
+        if (search) {
+          params.push(`%${search}%`);
+          where += ` AND (c.first_name ILIKE $2 OR c.last_name ILIKE $2 OR c.email ILIKE $2)`;
+        }
+
+        const countRes = await db.query(
+          `SELECT COUNT(*)::int AS total FROM contact c ${where}`,
+          params,
+        );
+
+        // account_name and last_activity_at are joined, not stored: the UI shows
+        // a company column and a "last touched" column, and without these the
+        // table could only render a name and an email.
+        const rows = await db.query(
+          `SELECT c.*,
+                  acc.name           AS account_name,
+                  MAX(a.occurred_at) AS last_activity_at
+           FROM   contact c
+           LEFT   JOIN account  acc ON acc.id = c.account_id AND acc.tenant_id = c.tenant_id
+           LEFT   JOIN activity a   ON a.contact_id = c.id   AND a.tenant_id  = c.tenant_id
+           ${where}
+           GROUP  BY c.id, acc.name
+           ORDER  BY c.updated_at DESC
+           LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+          [...params, pageSize, (page - 1) * pageSize],
+        );
+
+        return { result: { items: rows.rows, total: countRes.rows[0]?.total ?? 0, page, pageSize } };
+      }
+
+      case 'list_campaigns': {
+        // Campaign metrics are AGGREGATES, not columns. activity has no
+        // campaign_id, so the path is campaign -> agent_run -> activity /
+        // call_result.
+        //
+        // There is deliberately no open_rate or reply_rate here: activity.type
+        // is email|sms|call|note|task|meeting, and nothing in the schema records
+        // an email being opened or replied to. Returning a computed-looking
+        // number for those would be inventing data.
+        //
+        // COUNT(DISTINCT CASE ...) rather than FILTER, which keeps this portable
+        // across the Postgres subset Aurora DSQL implements.
+        const r = await db.query(
+          `SELECT c.*,
+                  COUNT(DISTINCT ar.contact_id)                                   AS contacts_total,
+                  COUNT(DISTINCT CASE WHEN a.id IS NOT NULL THEN a.contact_id END) AS contacts_touched,
+                  COUNT(DISTINCT cr.id)                                            AS calls_made,
+                  COUNT(DISTINCT CASE WHEN a.type = 'meeting' THEN a.id END)       AS meetings_booked,
+                  COUNT(DISTINCT ar.id)                                            AS agent_runs
+           FROM   campaign c
+           LEFT   JOIN agent_run   ar ON ar.campaign_id  = c.id  AND ar.tenant_id = c.tenant_id
+           LEFT   JOIN activity    a  ON a.agent_run_id  = ar.id AND a.tenant_id  = c.tenant_id
+           LEFT   JOIN call_result cr ON cr.agent_run_id = ar.id AND cr.tenant_id = c.tenant_id
+           WHERE  c.tenant_id = $1
+           GROUP  BY c.id
+           ORDER  BY c.created_at DESC`,
+          [tenantId],
+        );
+        return { result: r.rows };
+      }
+
+      case 'list_deals': {
+        const page = Math.max(1, Number(payload.page ?? 1));
+        const pageSize = Math.min(100, Math.max(1, Number(payload.pageSize ?? 50)));
+
+        // Distinct from get_pipeline_data, which is the FORECASTING view: that
+        // one excludes Closed Won and only looks back N days. A deals table
+        // must show every deal, including the won ones.
+        const countRes = await db.query(
+          `SELECT COUNT(*)::int AS total FROM deal WHERE tenant_id = $1`, [tenantId]);
+        const rows = await db.query(
+          `SELECT d.*, acc.name AS account_name
+           FROM   deal d
+           LEFT   JOIN account acc ON acc.id = d.account_id AND acc.tenant_id = d.tenant_id
+           WHERE  d.tenant_id = $1
+           ORDER  BY d.amount DESC
+           LIMIT $2 OFFSET $3`,
+          [tenantId, pageSize, (page - 1) * pageSize],
+        );
+        return {
+          result: {
+            items: rows.rows,
+            total: countRes.rows[0]?.total ?? 0,
+            page,
+            pageSize,
+          },
+        };
+      }
+
+      case 'list_agent_runs': {
+        const page = Math.max(1, Number(payload.page ?? 1));
+        const pageSize = Math.min(100, Math.max(1, Number(payload.pageSize ?? 20)));
+
+        const countRes = await db.query(
+          `SELECT COUNT(*)::int AS total FROM agent_run WHERE tenant_id = $1`,
+          [tenantId],
+        );
+        const rows = await db.query(
+          `SELECT ar.*, c.first_name, c.last_name
+           FROM   agent_run ar
+           LEFT JOIN contact c ON c.id = ar.contact_id AND c.tenant_id = ar.tenant_id
+           WHERE  ar.tenant_id = $1
+           ORDER BY ar.started_at DESC
+           LIMIT $2 OFFSET $3`,
+          [tenantId, pageSize, (page - 1) * pageSize],
+        );
+        return {
+          result: {
+            items: rows.rows,
+            total: countRes.rows[0]?.total ?? 0,
+            page,
+            pageSize,
+          },
+        };
+      }
+
+      case 'get_dashboard_stats': {
+        // One statement, not five. Each sub-select is tenant-scoped; a missing
+        // tenant_id predicate anywhere here would leak across tenants.
+        const r = await db.query(
+          `SELECT
+             (SELECT COUNT(*)::int FROM contact   WHERE tenant_id = $1) AS total_contacts,
+             (SELECT COUNT(*)::int FROM campaign  WHERE tenant_id = $1
+                AND status = 'active')                                  AS active_campaigns,
+             (SELECT COUNT(*)::int FROM agent_run WHERE tenant_id = $1
+                AND status = 'running')                                 AS running_agents,
+             (SELECT COUNT(*)::int FROM deal      WHERE tenant_id = $1)  AS total_deals,
+             (SELECT COALESCE(SUM(amount), 0)::float FROM deal
+                WHERE tenant_id = $1)                                    AS pipeline_value`,
+          [tenantId],
+        );
+        return { result: r.rows[0] ?? {} };
+      }
+
       default:
         return { statusCode: 400, body: JSON.stringify({ error: `Unknown operation: ${operation}` }) };
     }
@@ -453,4 +659,42 @@ export const handler: Handler<
     console.error('CRM read error', { operation, error: msg });
     return { ok: false, error: msg };
   }
+};
+
+// ── API Gateway proxy boundary ───────────────────────────────────────────────
+// A Lambda PROXY integration requires {statusCode, headers, body}. Most
+// operations below return a bare {result: ...}; returned as-is through the
+// proxy that yields a 502 "Internal server error" with nothing in the log to
+// explain it. So dispatch() keeps its natural return shape and the exported
+// handler adapts it at the boundary -- and only when the caller was API
+// Gateway. Agents invoke these same functions directly and must keep getting
+// the raw object.
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'Content-Type,Authorization,x-impulsoiq-tenant',
+  'Content-Type': 'application/json',
+};
+
+function toProxyResponse(out: unknown) {
+  // An early return that already built a proxy response passes straight through.
+  if (out && typeof out === 'object' && 'statusCode' in (out as object)) {
+    const r = out as { statusCode: number; body?: string; headers?: Record<string, string> };
+    return { ...r, headers: { ...CORS_HEADERS, ...r.headers } };
+  }
+  const failed = !!(out && typeof out === 'object' && (out as { ok?: boolean }).ok === false);
+  return {
+    statusCode: failed ? 500 : 200,
+    headers: CORS_HEADERS,
+    body: JSON.stringify(out ?? null),
+  };
+}
+
+export const handler: Handler<
+  { operation: Operation; payload: Record<string, unknown>; tenantId?: string }
+  | APIGatewayProxyEvent,
+  unknown
+> = async (event, context, callback) => {
+  const viaApiGateway = !!event && typeof event === 'object' && 'requestContext' in event;
+  const out = await dispatch(event, context, callback);
+  return viaApiGateway ? toProxyResponse(out) : out;
 };
