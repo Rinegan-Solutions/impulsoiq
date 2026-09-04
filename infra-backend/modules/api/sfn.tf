@@ -196,8 +196,13 @@ resource "aws_sfn_state_machine" "campaign" {
         ResultPath       = "$.approvalResult"
         Retry            = local.sfn_retry
         Next             = "SendEmail"
+        # States.ALL must be the ONLY entry in its catcher and the last catcher
+        # in the list -- ASL rejects it alongside a named error. Listing
+        # States.HeartbeatTimeout next to it was also redundant: States.ALL
+        # already matches it, and both routed to HandleError with the same
+        # ResultPath, so collapsing loses nothing.
         Catch = [{
-          ErrorEquals = ["States.HeartbeatTimeout", "States.ALL"]
+          ErrorEquals = ["States.ALL"]
           Next        = "HandleError"
           ResultPath  = "$.error"
         }]
@@ -296,8 +301,14 @@ resource "aws_sfn_state_machine" "campaign" {
         ResultPath       = "$.callResult"
         Retry            = local.sfn_retry
         Next             = "ProcessCallResult"
+        # Same ASL rule as the email approval gate above: States.ALL alone, last.
+        # The named errors this replaces were States.HeartbeatTimeout (no
+        # CALL-E webhook inside 24h) and CALL_FAILED (the voice provider
+        # reporting a failed call). Both are already matched by States.ALL and
+        # both routed here identically. Note neither is in local.sfn_retry, so
+        # a failed call is not retried -- it goes straight to HandleError.
         Catch = [{
-          ErrorEquals = ["States.HeartbeatTimeout", "CALL_FAILED", "States.ALL"]
+          ErrorEquals = ["States.ALL"]
           Next        = "HandleError"
           ResultPath  = "$.error"
         }]
