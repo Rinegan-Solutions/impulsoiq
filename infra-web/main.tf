@@ -100,28 +100,31 @@ resource "aws_acm_certificate" "web" {
 }
 
 # ACM publishes the CNAME it wants to see; we write it into the zone.
-# ACM emits ONE validation option per name on the certificate, but a wildcard
-# and its base domain share the same validation record: *.example.com and
-# example.com both validate via _x.example.com. Keying this map on
-# dvo.domain_name therefore produces two entries writing the SAME Route53
-# record, which is a duplicate-resource conflict. Keying on the record NAME
-# collapses them to one, which is what ACM actually expects.
+# ACM gives a wildcard and its base domain the SAME validation record:
+# *.example.com and example.com both validate through _x.example.com. Emitting
+# one Route53 resource per validation option would therefore declare two
+# resources writing one record.
+#
+# The fix is to skip the wildcard, not to re-key the map. for_each keys must be
+# known at PLAN time, and resource_record_name is only known after apply — so
+# keying on it fails with "keys derived from resource attributes that cannot be
+# determined until apply" the moment the certificate is replaced. domain_name
+# mirrors the configuration, so it stays known.
 resource "aws_route53_record" "cert_validation" {
   for_each = {
     for dvo in aws_acm_certificate.web.domain_validation_options :
-    dvo.resource_record_name => {
+    dvo.domain_name => {
       name   = dvo.resource_record_name
       record = dvo.resource_record_value
       type   = dvo.resource_record_type
-    }...
+    }
+    if !startswith(dvo.domain_name, "*.")
   }
 
-  zone_id = data.aws_route53_zone.main.zone_id
-  name    = each.key
-  type    = each.value[0].type
-  # distinct() because the collapsed group may legitimately contain the same
-  # value twice (wildcard + base); ACM accepts a single record either way.
-  records         = distinct([for v in each.value : v.record])
+  zone_id         = data.aws_route53_zone.main.zone_id
+  name            = each.value.name
+  type            = each.value.type
+  records         = [each.value.record]
   ttl             = 60
   allow_overwrite = true
 }

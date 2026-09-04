@@ -91,6 +91,44 @@ phases:
 
       - |
         set -euo pipefail
+        . /tmp/dsql.env
+        PSQL="psql host=${DSQL_ENDPOINT} port=5432 dbname=postgres user=admin sslmode=require"
+
+        # Aurora DSQL builds every secondary index ASYNCHRONOUSLY -- CREATE INDEX
+        # ASYNC returns a job id immediately and the index is INVALID until the
+        # build finishes. AWS's own migration guidance is to wait before running
+        # dependent DDL or DML, and we have a concrete dependency: the registry
+        # seeder runs next, and crm-write-service upserts against unique indexes
+        # (call_result.idempotency_key) that do not enforce anything until valid.
+        echo "── waiting for index builds ──"
+        for i in $(seq 1 60); do
+          PENDING=$($PSQL -tAc             "SELECT count(*) FROM sys.jobs
+              WHERE job_type = 'INDEX_BUILD' AND status IN ('submitted','processing')")
+          FAILED=$($PSQL -tAc             "SELECT count(*) FROM sys.jobs
+              WHERE job_type = 'INDEX_BUILD' AND status = 'failed'")
+
+          if [ "$FAILED" != "0" ]; then
+            echo "ERROR: $FAILED index build(s) failed."
+            # A failed build leaves the index INVALID and DSQL does not remove
+            # it, so the definition must be dropped before it can be retried.
+            $PSQL -c "SELECT job_id, object_name, details FROM sys.jobs
+                       WHERE job_type='INDEX_BUILD' AND status='failed'"
+            exit 1
+          fi
+
+          [ "$PENDING" = "0" ] && { echo "all index builds complete"; break; }
+          echo "  $PENDING build(s) in progress ($i/60)…"
+          sleep 5
+
+          if [ "$i" = "60" ]; then
+            echo "ERROR: index builds still pending after 5 minutes."
+            $PSQL -c "SELECT job_id, status, object_name FROM sys.jobs WHERE job_type='INDEX_BUILD'"
+            exit 1
+          fi
+        done
+
+      - |
+        set -euo pipefail
         echo "── seeding the agent registry ──"
         # RequestResponse so a seeding failure fails the build. Fire-and-forget
         # would let the pipeline go green with an empty catalog.

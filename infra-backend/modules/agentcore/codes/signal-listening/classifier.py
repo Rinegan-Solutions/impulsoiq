@@ -22,7 +22,10 @@ import boto3
 REGION = os.environ.get("AWS_REGION", "eu-west-2")
 
 # Nova Micro — cheapest tier, purpose-built for simple classification
-CLASSIFIER_MODEL = "us.amazon.nova-micro-v1:0"
+# Overridable so the deployment picks the model, like every other agent.
+# The us.* default was a US-only inference profile and does not resolve in
+# eu-west-2; Terraform sets SIGNAL_CLASSIFIER_MODEL to the in-region id.
+CLASSIFIER_MODEL = os.environ.get("SIGNAL_CLASSIFIER_MODEL", "amazon.nova-micro-v1:0")
 
 # Daily token budget per tenant (hard-coded, not agent-discretionary per v3 spec)
 DAILY_STAGE1_TOKEN_BUDGET = int(os.environ.get("SIGNAL_DAILY_STAGE1_TOKENS", "500000"))

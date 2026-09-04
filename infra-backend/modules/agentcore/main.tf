@@ -3,6 +3,58 @@
 # All AgentCore Runtime containers target ARM64 (aarch64).
 
 locals {
+  # ── Bedrock model selection ────────────────────────────────────────────────
+  # Every agent read a *_MODEL env var and fell back to a hardcoded
+  # "us.amazon.nova-lite-v1:0". The us. prefix is a US-ONLY cross-region
+  # inference profile: it does not resolve in eu-west-2, so every agent failed
+  # on its first model call. eu-west-2 publishes exactly one Nova inference
+  # profile, and it is the Nova 2 Lite that both plans specify as the roster
+  # default:
+  #
+  #   $ aws bedrock list-inference-profiles --region eu-west-2
+  #     global.amazon.nova-2-lite-v1:0
+  #
+  # Setting these here rather than editing each agent keeps the model a
+  # deployment decision, so a region change or a model upgrade is one edit.
+  default_model = "global.amazon.nova-2-lite-v1:0"
+
+  # Signal Listening's first-pass classifier is deliberately the cheapest tier
+  # (plan §5.2): high-volume binary relevance filtering, where anything dearer
+  # would dominate the cost of a feature that is cheap precisely because almost
+  # everything is discarded at this stage.
+  classifier_model = "amazon.nova-micro-v1:0"
+
+  # Per-agent environment overrides, keyed by the variable each agent reads.
+  agent_model_env = {
+    coordinator         = { COORDINATOR_MODEL = local.default_model }
+    clarification       = { CLARIFICATION_MODEL = local.default_model }
+    research-enrichment = { ENRICHMENT_MODEL = local.default_model }
+    outreach            = { OUTREACH_MODEL = local.default_model }
+    voice               = { VOICE_MODEL = local.default_model }
+    nurture             = { NURTURE_MODEL = local.default_model }
+    forecasting-insight = { FORECASTING_MODEL = local.default_model }
+    data-hygiene        = { HYGIENE_MODEL = local.default_model }
+    deep-research       = { DEEP_RESEARCH_MODEL = local.default_model }
+    triage-escalation   = { TRIAGE_MODEL = local.default_model }
+    resolution          = { RESOLUTION_MODEL = local.default_model }
+    support-insight     = { SUPPORT_INSIGHT_MODEL = local.default_model }
+
+    signal-listening = {
+      SIGNAL_STAGE2_MODEL     = local.default_model
+      SIGNAL_CLASSIFIER_MODEL = local.classifier_model
+    }
+
+    # Nova Sonic is NOT available in eu-west-2 -- the region publishes no sonic
+    # model at all, so speech-to-speech cannot run in-region. AMBIENT_MODEL is
+    # left to var.ambient_voice_model so the cross-region endpoint can be set
+    # deliberately; the text fallback runs on the in-region default and is what
+    # keeps the agent usable meanwhile.
+    ambient-interface = {
+      AMBIENT_MODEL      = var.ambient_voice_model
+      AMBIENT_TEXT_MODEL = local.default_model
+    }
+  }
+
   # NOTE: AgentCore naming rules differ per resource, in opposite directions.
   #   agent_runtime_name    [a-zA-Z0-9_], max 48  — underscores, NO hyphens
   #   gateway_target.name   ^([0-9a-zA-Z][-]?)+$  — hyphens, NO underscores
@@ -216,6 +268,7 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
   }
 
   environment_variables = merge(
+    local.agent_model_env[each.key],
     {
       ENV                   = var.env
       CRM_WRITE_SERVICE_ARN = var.crm_write_service_arn

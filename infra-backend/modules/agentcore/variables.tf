@@ -81,3 +81,18 @@ variable "metering_table" {
   default     = ""
   description = "DynamoDB metering table name (usage counters)"
 }
+
+variable "ambient_voice_model" {
+  type        = string
+  description = <<-EOT
+    Speech-to-speech model for the Ambient Interface Agent.
+
+    Nova Sonic is not offered in eu-west-2 -- `aws bedrock
+    list-foundation-models --region eu-west-2` returns no sonic model — so this
+    must name a cross-region endpoint to enable spoken interaction, and the
+    agent falls back to its text path when it cannot reach one. Left empty by
+    default so the capability is switched on deliberately rather than failing
+    silently in a region that cannot serve it.
+  EOT
+  default     = ""
+}

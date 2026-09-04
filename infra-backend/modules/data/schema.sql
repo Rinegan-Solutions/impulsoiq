@@ -37,8 +37,8 @@ CREATE TABLE IF NOT EXISTS tenant (
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_subdomain    ON tenant(subdomain);
-CREATE        INDEX IF NOT EXISTS idx_tenant_email_domain ON tenant(email_domain);
+CREATE UNIQUE INDEX ASYNC IF NOT EXISTS idx_tenant_subdomain    ON tenant(subdomain);
+CREATE        INDEX ASYNC IF NOT EXISTS idx_tenant_email_domain ON tenant(email_domain);
 
 -- ── Accounts (companies) ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS account (
@@ -55,8 +55,8 @@ CREATE TABLE IF NOT EXISTS account (
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_account_tenant  ON account(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_account_domain  ON account(tenant_id, domain);
+CREATE INDEX ASYNC IF NOT EXISTS idx_account_tenant  ON account(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_account_domain  ON account(tenant_id, domain);
 
 -- ── Contacts ──────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS contact (
@@ -78,10 +78,10 @@ CREATE TABLE IF NOT EXISTS contact (
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_contact_tenant  ON contact(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_contact_account ON contact(account_id);
-CREATE INDEX IF NOT EXISTS idx_contact_email   ON contact(tenant_id, email);
-CREATE INDEX IF NOT EXISTS idx_contact_stage   ON contact(tenant_id, stage);
+CREATE INDEX ASYNC IF NOT EXISTS idx_contact_tenant  ON contact(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_contact_account ON contact(account_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_contact_email   ON contact(tenant_id, email);
+CREATE INDEX ASYNC IF NOT EXISTS idx_contact_stage   ON contact(tenant_id, stage);
 
 -- ── Deals ─────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS deal (
@@ -100,9 +100,9 @@ CREATE TABLE IF NOT EXISTS deal (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_deal_tenant  ON deal(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_deal_account ON deal(account_id);
-CREATE INDEX IF NOT EXISTS idx_deal_stage   ON deal(tenant_id, stage);
+CREATE INDEX ASYNC IF NOT EXISTS idx_deal_tenant  ON deal(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_deal_account ON deal(account_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_deal_stage   ON deal(tenant_id, stage);
 
 -- ── Campaigns ─────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS campaign (
@@ -117,8 +117,8 @@ CREATE TABLE IF NOT EXISTS campaign (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_campaign_tenant ON campaign(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_campaign_status ON campaign(tenant_id, status);
+CREATE INDEX ASYNC IF NOT EXISTS idx_campaign_tenant ON campaign(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_campaign_status ON campaign(tenant_id, status);
 
 -- ── Agent Runs ────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS agent_run (
@@ -141,10 +141,10 @@ CREATE TABLE IF NOT EXISTS agent_run (
   ended_at                    TIMESTAMPTZ,
   created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_agent_run_tenant   ON agent_run(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_agent_run_campaign ON agent_run(campaign_id);
-CREATE INDEX IF NOT EXISTS idx_agent_run_contact  ON agent_run(contact_id);
-CREATE INDEX IF NOT EXISTS idx_agent_run_status   ON agent_run(tenant_id, status);
+CREATE INDEX ASYNC IF NOT EXISTS idx_agent_run_tenant   ON agent_run(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_agent_run_campaign ON agent_run(campaign_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_agent_run_contact  ON agent_run(contact_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_agent_run_status   ON agent_run(tenant_id, status);
 
 -- ── Activities (human- and agent-authored — same table by design) ─────────────
 CREATE TABLE IF NOT EXISTS activity (
@@ -164,10 +164,10 @@ CREATE TABLE IF NOT EXISTS activity (
   occurred_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_activity_tenant    ON activity(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_activity_contact   ON activity(contact_id);
-CREATE INDEX IF NOT EXISTS idx_activity_agent_run ON activity(agent_run_id);
-CREATE INDEX IF NOT EXISTS idx_activity_occurred  ON activity(tenant_id, occurred_at DESC);
+CREATE INDEX ASYNC IF NOT EXISTS idx_activity_tenant    ON activity(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_activity_contact   ON activity(contact_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_activity_agent_run ON activity(agent_run_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_activity_occurred  ON activity(tenant_id, occurred_at DESC);
 
 -- ── Call Results ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS call_result (
@@ -186,9 +186,9 @@ CREATE TABLE IF NOT EXISTS call_result (
   occurred_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_call_result_idempotency ON call_result(idempotency_key);
-CREATE INDEX        IF NOT EXISTS idx_call_result_tenant      ON call_result(tenant_id);
-CREATE INDEX        IF NOT EXISTS idx_call_result_contact     ON call_result(contact_id);
+CREATE UNIQUE INDEX ASYNC IF NOT EXISTS idx_call_result_idempotency ON call_result(idempotency_key);
+CREATE INDEX        ASYNC IF NOT EXISTS idx_call_result_tenant      ON call_result(tenant_id);
+CREATE INDEX        ASYNC IF NOT EXISTS idx_call_result_contact     ON call_result(contact_id);
 
 -- ── Workspace Templates (Phase 5) ────────────────────────────────────────────
 -- Stores per-tenant activations of the 5 workspace templates.
@@ -208,8 +208,8 @@ CREATE TABLE IF NOT EXISTS workspace_template (
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (tenant_id, template_key)
 );
-CREATE INDEX IF NOT EXISTS idx_workspace_template_tenant ON workspace_template(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_workspace_template_status ON workspace_template(tenant_id, status);
+CREATE INDEX ASYNC IF NOT EXISTS idx_workspace_template_tenant ON workspace_template(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_workspace_template_status ON workspace_template(tenant_id, status);
 
 -- ── Consent Records (first-class entity — hard gate for ALL outbound comms) ───
 -- ConsentRecord is NOT a flag on Contact. It is a separate, auditable entity.
@@ -227,8 +227,8 @@ CREATE TABLE IF NOT EXISTS consent_record (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 -- One active consent record per contact/channel; upsert replaces existing.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_consent_contact_channel ON consent_record(tenant_id, contact_id, channel);
-CREATE INDEX        IF NOT EXISTS idx_consent_tenant           ON consent_record(tenant_id);
+CREATE UNIQUE INDEX ASYNC IF NOT EXISTS idx_consent_contact_channel ON consent_record(tenant_id, contact_id, channel);
+CREATE INDEX        ASYNC IF NOT EXISTS idx_consent_tenant           ON consent_record(tenant_id);
 
 -- ── Phase 6B: AgentCore Registry ──────────────────────────────────────────────
 -- Discoverable catalog of agents, tools, and templates for enterprise admins.
@@ -251,16 +251,19 @@ CREATE TABLE IF NOT EXISTS agent_registry (
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (entry_type, key)
 );
-CREATE INDEX IF NOT EXISTS idx_registry_type   ON agent_registry(entry_type, status);
-CREATE INDEX IF NOT EXISTS idx_registry_status ON agent_registry(status);
+CREATE INDEX ASYNC IF NOT EXISTS idx_registry_type   ON agent_registry(entry_type, status);
+CREATE INDEX ASYNC IF NOT EXISTS idx_registry_status ON agent_registry(status);
 
 -- ── Phase 6D: Tenant compliance settings ──────────────────────────────────────
 -- Per-tenant jurisdiction flags and SSO configuration.
 -- Stored as a column on the existing tenant table.
-ALTER TABLE tenant
-  ADD COLUMN IF NOT EXISTS compliance_settings JSONB NOT NULL DEFAULT '{}',
-  ADD COLUMN IF NOT EXISTS sso_configured      BOOLEAN NOT NULL DEFAULT FALSE,
-  ADD COLUMN IF NOT EXISTS sso_provider_id     TEXT;
+-- One ALTER per statement: Aurora DSQL allows a single DDL statement per
+-- transaction, and psql runs each statement in its own implicit transaction.
+-- Three ADD COLUMN clauses in one ALTER is one statement and would probably be
+-- accepted, but splitting removes the question entirely and costs nothing.
+ALTER TABLE tenant ADD COLUMN IF NOT EXISTS compliance_settings JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE tenant ADD COLUMN IF NOT EXISTS sso_configured      BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE tenant ADD COLUMN IF NOT EXISTS sso_provider_id     TEXT;
 
 -- ── Phase 6C: A2A handoff log ──────────────────────────────────────────────────
 -- Records cross-department agent handoff events for audit and observability.
@@ -278,5 +281,5 @@ CREATE TABLE IF NOT EXISTS a2a_handoff (
   completed_at     TIMESTAMPTZ,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_a2a_tenant   ON a2a_handoff(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_a2a_status   ON a2a_handoff(tenant_id, status);
+CREATE INDEX ASYNC IF NOT EXISTS idx_a2a_tenant   ON a2a_handoff(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_a2a_status   ON a2a_handoff(tenant_id, status);

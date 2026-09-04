@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS sla_policy (
   breach_escalation_rule        JSONB       NOT NULL DEFAULT '{}',
   created_at                    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_sla_policy_tenant ON sla_policy(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_sla_policy_tenant ON sla_policy(tenant_id);
 
 -- ── Support queue ─────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS support_queue (
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS support_queue (
   sla_policy_id   UUID        REFERENCES sla_policy(id),
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_support_queue_tenant ON support_queue(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_support_queue_tenant ON support_queue(tenant_id);
 
 -- ── Conversation ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS conversation (
@@ -51,9 +51,9 @@ CREATE TABLE IF NOT EXISTS conversation (
   csat_score         NUMERIC(3,1) CHECK (csat_score BETWEEN 1.0 AND 5.0),
   csat_captured_at   TIMESTAMPTZ
 );
-CREATE INDEX IF NOT EXISTS idx_conversation_tenant  ON conversation(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_conversation_contact ON conversation(contact_id);
-CREATE INDEX IF NOT EXISTS idx_conversation_status  ON conversation(tenant_id, status);
+CREATE INDEX ASYNC IF NOT EXISTS idx_conversation_tenant  ON conversation(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_conversation_contact ON conversation(contact_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_conversation_status  ON conversation(tenant_id, status);
 
 -- ── Message ───────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS message (
@@ -71,8 +71,8 @@ CREATE TABLE IF NOT EXISTS message (
                       CHECK (sentiment_score BETWEEN -1.0 AND 1.0),
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_message_conversation ON message(conversation_id);
-CREATE INDEX IF NOT EXISTS idx_message_tenant       ON message(tenant_id, created_at DESC);
+CREATE INDEX ASYNC IF NOT EXISTS idx_message_conversation ON message(conversation_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_message_tenant       ON message(tenant_id, created_at DESC);
 
 -- ── Ticket ────────────────────────────────────────────────────────────
 -- tier: 0=auto-resolve  1=draft-review  2=human-required  3=hard-escalate
@@ -94,10 +94,10 @@ CREATE TABLE IF NOT EXISTS ticket (
   created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_ticket_tenant ON ticket(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_ticket_queue  ON ticket(queue_id);
-CREATE INDEX IF NOT EXISTS idx_ticket_rep    ON ticket(tenant_id, assigned_rep_id);
-CREATE INDEX IF NOT EXISTS idx_ticket_sla    ON ticket(tenant_id, sla_target_at)
+CREATE INDEX ASYNC IF NOT EXISTS idx_ticket_tenant ON ticket(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_ticket_queue  ON ticket(queue_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_ticket_rep    ON ticket(tenant_id, assigned_rep_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_ticket_sla    ON ticket(tenant_id, sla_target_at)
   WHERE sla_breached_at IS NULL;
 
 -- ── Rep status ────────────────────────────────────────────────────────
@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS rep_status (
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (rep_id, tenant_id)
 );
-CREATE INDEX IF NOT EXISTS idx_rep_status_tenant ON rep_status(tenant_id, status);
+CREATE INDEX ASYNC IF NOT EXISTS idx_rep_status_tenant ON rep_status(tenant_id, status);
 
 -- ── Macro ─────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS macro (
@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS macro (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_macro_tenant ON macro(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_macro_tenant ON macro(tenant_id);
 
 -- ── Knowledge article ─────────────────────────────────────────────────
 -- embedding_ref points to S3 Vectors (same embed-on-write pipeline as
@@ -143,5 +143,5 @@ CREATE TABLE IF NOT EXISTS knowledge_article (
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_knowledge_article_tenant ON knowledge_article(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_knowledge_article_status ON knowledge_article(tenant_id, status);
+CREATE INDEX ASYNC IF NOT EXISTS idx_knowledge_article_tenant ON knowledge_article(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_knowledge_article_status ON knowledge_article(tenant_id, status);
