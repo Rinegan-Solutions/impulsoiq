@@ -28,18 +28,33 @@ phases:
       - |
         set -e
         echo "Locating tfplan from the plan stage's artifact..."
+
+        # CodePipeline exposes each SECONDARY input artifact as its own
+        # $CODEBUILD_SRC_DIR_<ArtifactName>. Careful: "$CODEBUILD_SRC_DIR_*" is
+        # NOT variable expansion -- the shell reads it as the unset variable
+        # $CODEBUILD_SRC_DIR_ followed by a glob, and silently expands to the
+        # working directory's entries. Enumerate through env instead.
         PLAN=""
-        for d in /codebuild/output/src*/src $CODEBUILD_SRC_DIR_*; do
-          [ -d "$d" ] || continue
+        for d in $(env | sed -n 's/^CODEBUILD_SRC_DIR_[A-Za-z0-9_]*=//p'); do
           if [ -f "$d/infra-backend/tfplan" ]; then PLAN="$d/infra-backend/tfplan"; break; fi
           if [ -f "$d/tfplan" ];               then PLAN="$d/tfplan";               break; fi
         done
+
+        # Fallback: scan the whole artifact tree. Depth varies
+        # (/codebuild/output/src<N>/src/s3/01), so no fixed glob is reliable.
+        if [ -z "$PLAN" ]; then
+          PLAN=$(find /codebuild/output -type f -name tfplan 2>/dev/null | head -1)
+        fi
+
         if [ -z "$PLAN" ]; then
           echo "ERROR: tfplan not found in any input artifact."
-          echo "Searched:"; for d in /codebuild/output/src*/src $CODEBUILD_SRC_DIR_*; do echo "  $d"; done
-          echo "Contents:"; find /codebuild/output -name tfplan 2>/dev/null | head
+          echo "Secondary artifact dirs:"
+          env | grep '^CODEBUILD_SRC_DIR' || echo "  (none)"
+          echo "Tree:"
+          find /codebuild/output -maxdepth 5 -type d 2>/dev/null | head -40
           exit 1
         fi
+
         echo "Found plan: $PLAN"
         cp "$PLAN" "$CODEBUILD_SRC_DIR/infra-backend/tfplan"
 
