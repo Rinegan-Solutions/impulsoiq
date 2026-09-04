@@ -90,8 +90,19 @@ phases:
 
   post_build:
     commands:
-      - echo "Apply complete for env=${ENV}"
-      - cd "$CODEBUILD_SRC_DIR/infra-backend" && terraform output -json > terraform-outputs.json
+      # post_build runs even when build FAILED, so this must branch on
+      # CODEBUILD_BUILD_SUCCEEDING. Without the check the log ends with
+      # "Apply complete for env=prod" directly beneath a failed apply, and
+      # terraform-outputs.json is published from a half-applied state.
+      - |
+        if [ "$CODEBUILD_BUILD_SUCCEEDING" = "1" ]; then
+          echo "Apply complete for env=${ENV}"
+          cd "$CODEBUILD_SRC_DIR/infra-backend"
+          terraform output -json > terraform-outputs.json
+        else
+          echo "Apply FAILED for env=${ENV} - not exporting outputs."
+          echo '{}' > "$CODEBUILD_SRC_DIR/infra-backend/terraform-outputs.json"
+        fi
 
 artifacts:
   files:

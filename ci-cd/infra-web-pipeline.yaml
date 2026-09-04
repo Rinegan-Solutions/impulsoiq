@@ -154,11 +154,22 @@ Resources:
                 Resource:
                   - !Sub '${PipelineArtifactsBucket.Arn}/*'
                   - !GetAtt PipelineArtifactsBucket.Arn
-              - Effect: Allow
+              # CodeBuild creates the log GROUP on a project's first ever build,
+              # not just a stream. Without logs:CreateLogGroup the build fails in
+              # the QUEUED phase with ACCESS_DENIED and produces no log output at
+              # all -- there is no log group to write it to, so the console shows
+              # a failed build with nothing to read.
+              # Both ARN forms are required: the bare log-group ARN authorises
+              # CreateLogGroup, the :* form authorises stream operations inside it.
+              - Sid: CodeBuildLogs
+                Effect: Allow
                 Action:
+                  - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*:*'
 
   # ─── IAM Roles for CodeBuild — Terraform + web deploy, split per environment ─
 
@@ -257,11 +268,22 @@ Resources:
                 Action:
                   - ssm:DescribeParameters
                 Resource: '*'
-              - Effect: Allow
+              # CodeBuild creates the log GROUP on a project's first ever build,
+              # not just a stream. Without logs:CreateLogGroup the build fails in
+              # the QUEUED phase with ACCESS_DENIED and produces no log output at
+              # all -- there is no log group to write it to, so the console shows
+              # a failed build with nothing to read.
+              # Both ARN forms are required: the bare log-group ARN authorises
+              # CreateLogGroup, the :* form authorises stream operations inside it.
+              - Sid: CodeBuildLogs
+                Effect: Allow
                 Action:
+                  - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*:*'
 
   CodeBuildTerraformRoleTest:
     Type: AWS::IAM::Role
@@ -357,11 +379,22 @@ Resources:
                 Action:
                   - ssm:DescribeParameters
                 Resource: '*'
-              - Effect: Allow
+              # CodeBuild creates the log GROUP on a project's first ever build,
+              # not just a stream. Without logs:CreateLogGroup the build fails in
+              # the QUEUED phase with ACCESS_DENIED and produces no log output at
+              # all -- there is no log group to write it to, so the console shows
+              # a failed build with nothing to read.
+              # Both ARN forms are required: the bare log-group ARN authorises
+              # CreateLogGroup, the :* form authorises stream operations inside it.
+              - Sid: CodeBuildLogs
+                Effect: Allow
                 Action:
+                  - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*:*'
 
   CodeBuildTerraformRoleProd:
     Type: AWS::IAM::Role
@@ -457,11 +490,22 @@ Resources:
                 Action:
                   - ssm:DescribeParameters
                 Resource: '*'
-              - Effect: Allow
+              # CodeBuild creates the log GROUP on a project's first ever build,
+              # not just a stream. Without logs:CreateLogGroup the build fails in
+              # the QUEUED phase with ACCESS_DENIED and produces no log output at
+              # all -- there is no log group to write it to, so the console shows
+              # a failed build with nothing to read.
+              # Both ARN forms are required: the bare log-group ARN authorises
+              # CreateLogGroup, the :* form authorises stream operations inside it.
+              - Sid: CodeBuildLogs
+                Effect: Allow
                 Action:
+                  - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*:*'
 
   # ─── CodeBuild Projects — Tests ──────────────────────────────────────────────
 

@@ -143,7 +143,26 @@ resource "aws_connect_contact_flow" "inbound_voice" {
   description = "Inbound voice: invoke Triage agent, route by tier"
   type        = "CONTACT_FLOW"
 
-  # Simplified contact flow: Lambda → tier attribute → queue routing
+  # Contact flow: Lambda (Triage) -> set target queue -> transfer -> disconnect.
+  #
+  # The flow language is stricter than it looks, and CreateContactFlow reports
+  # violations as an InvalidContactFlowException with an EMPTY message, so each
+  # rule below is written out rather than inferred:
+  #
+  #  - Transitions uses NextAction / Errors / Conditions. There are no "Success"
+  #    or "Error" keys; an Errors entry is {ErrorType, NextAction}.
+  #  - Routing is two steps, not one. UpdateContactTargetQueue sets the target
+  #    queue; TransferContactToQueue then moves the contact into whatever that
+  #    target is and takes NO QueueId of its own. There is no "TransferToQueue".
+  #  - UpdateContactTargetQueue's QueueId must be either fully static or a single
+  #    JSONPath reference -- it cannot be interpolated or built from parts.
+  #    $.External.* is where an InvokeLambdaFunction result lands.
+  #  - A terminal action carries Transitions = {} and Parameters = {}.
+  #  - InvocationTimeLimitSeconds is a STRING and Connect caps it at 8.
+  #
+  # To regenerate this by hand: build the flow in the Connect console and call
+  # DescribeContactFlow -- that is what AWS recommends, and it emits exactly this
+  # shape.
   content = jsonencode({
     Version     = "2019-10-30"
     StartAction = "invoke-triage"
@@ -154,38 +173,55 @@ resource "aws_connect_contact_flow" "inbound_voice" {
         Parameters = {
           LambdaFunctionARN          = var.connect_intake_lambda_arn
           InvocationTimeLimitSeconds = "8"
-          LambdaInvocationAttributes = {
-            tenantId = "$.Attributes.tenantId"
-          }
         }
         Transitions = {
-          Success = "route-by-tier"
-          Error   = "route-default"
+          NextAction = "set-tier-queue"
+          # If Triage fails or times out the call must still reach a human,
+          # so every error path lands on the general queue rather than hanging up.
+          Errors     = [{ ErrorType = "NoMatchingError", NextAction = "set-default-queue" }]
+          Conditions = []
         }
       },
       {
-        Identifier = "route-by-tier"
-        Type       = "TransferToQueue"
-        Parameters = {
-          QueueId = "$.External.queueId"
-        }
+        # queueId is returned by the connect-intake Lambda for the chosen tier.
+        Identifier = "set-tier-queue"
+        Type       = "UpdateContactTargetQueue"
+        Parameters = { QueueId = "$.External.queueId" }
         Transitions = {
-          Success = "end"
-          Error   = "route-default"
+          NextAction = "transfer-to-queue"
+          Errors     = [{ ErrorType = "NoMatchingError", NextAction = "set-default-queue" }]
+          Conditions = []
         }
       },
       {
-        Identifier = "route-default"
-        Type       = "TransferToQueue"
-        Parameters = {
-          QueueId = aws_connect_queue.general.queue_id
+        Identifier = "set-default-queue"
+        Type       = "UpdateContactTargetQueue"
+        Parameters = { QueueId = aws_connect_queue.general.arn }
+        Transitions = {
+          NextAction = "transfer-to-queue"
+          Errors     = [{ ErrorType = "NoMatchingError", NextAction = "disconnect" }]
+          Conditions = []
         }
-        Transitions = { Success = "end" }
       },
       {
-        Identifier = "end"
-        Type       = "DisconnectParticipant"
-      }
+        Identifier = "transfer-to-queue"
+        Type       = "TransferContactToQueue"
+        Parameters = {}
+        Transitions = {
+          NextAction = "disconnect"
+          Errors = [
+            { ErrorType = "QueueAtCapacity", NextAction = "disconnect" },
+            { ErrorType = "NoMatchingError", NextAction = "disconnect" },
+          ]
+          Conditions = []
+        }
+      },
+      {
+        Identifier  = "disconnect"
+        Type        = "DisconnectParticipant"
+        Parameters  = {}
+        Transitions = {}
+      },
     ]
   })
 

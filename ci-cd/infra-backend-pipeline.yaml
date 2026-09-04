@@ -289,6 +289,15 @@ Resources:
                   - iam:CreateRole
                   - iam:DeleteRole
                   - iam:PassRole
+                  # Changing a role's trust policy on an EXISTING role is
+                  # UpdateAssumeRolePolicy, not CreateRole -- a distinct action
+                  # that CreateRole does not imply. Without it, any edit to an
+                  # assume_role_policy fails on the second apply while the first
+                  # apply of the same code succeeds.
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:UpdateRole
+                  - iam:UpdateRoleDescription
+                  - iam:ListRoleTags
                   - iam:AttachRolePolicy
                   - iam:DetachRolePolicy
                   - iam:PutRolePolicy
@@ -515,6 +524,15 @@ Resources:
                   - iam:CreateRole
                   - iam:DeleteRole
                   - iam:PassRole
+                  # Changing a role's trust policy on an EXISTING role is
+                  # UpdateAssumeRolePolicy, not CreateRole -- a distinct action
+                  # that CreateRole does not imply. Without it, any edit to an
+                  # assume_role_policy fails on the second apply while the first
+                  # apply of the same code succeeds.
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:UpdateRole
+                  - iam:UpdateRoleDescription
+                  - iam:ListRoleTags
                   - iam:AttachRolePolicy
                   - iam:DetachRolePolicy
                   - iam:PutRolePolicy
@@ -741,6 +759,15 @@ Resources:
                   - iam:CreateRole
                   - iam:DeleteRole
                   - iam:PassRole
+                  # Changing a role's trust policy on an EXISTING role is
+                  # UpdateAssumeRolePolicy, not CreateRole -- a distinct action
+                  # that CreateRole does not imply. Without it, any edit to an
+                  # assume_role_policy fails on the second apply while the first
+                  # apply of the same code succeeds.
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:UpdateRole
+                  - iam:UpdateRoleDescription
+                  - iam:ListRoleTags
                   - iam:AttachRolePolicy
                   - iam:DetachRolePolicy
                   - iam:PutRolePolicy

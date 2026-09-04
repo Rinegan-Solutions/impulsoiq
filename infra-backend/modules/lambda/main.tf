@@ -51,6 +51,152 @@ resource "aws_iam_role_policy_attachment" "basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
+# AWSLambdaBasicExecutionRole grants CloudWatch Logs and NOTHING else. Every
+# permission below is derived from an SDK client actually imported by a handler
+# in codes/ -- not speculative.
+#
+# SCOPE NOTE: all 20 functions share one execution role, so this is the union of
+# what any of them needs. That is weaker than a role per function: crm-read can
+# technically start a Step Functions execution. Every statement is still bounded
+# to impulsoiq-*-<env> resources, so the blast radius stays inside this
+# environment. Splitting per function is the right follow-up, but it is a
+# refactor of for_each, not a one-line change.
+resource "aws_iam_role_policy" "lambda" {
+  name = "${var.project}-lambda-policy-${var.env}"
+  role = aws_iam_role.lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        # @aws-sdk/client-dynamodb — imported by 22 handlers
+        Sid    = "DynamoDbData"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan",
+          "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem",
+          "dynamodb:DescribeTable",
+        ]
+        Resource = [
+          "arn:aws:dynamodb:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:table/${var.project}-*-${var.env}",
+          "arn:aws:dynamodb:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:table/${var.project}-*-${var.env}/index/*",
+        ]
+      },
+      {
+        # Required by the three aws_lambda_event_source_mapping resources below.
+        # Without these, CreateEventSourceMapping fails at APPLY time with
+        # "Cannot access stream ... ensure the role can perform GetRecords,
+        # GetShardIterator, DescribeStream, and ListStreams" -- Lambda validates
+        # the role up front rather than failing later at invoke time.
+        # Wildcarded on /stream/* because the stream ARN carries a timestamp and
+        # changes whenever the stream is disabled and re-enabled.
+        Sid    = "DynamoDbStreams"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetRecords", "dynamodb:GetShardIterator",
+          "dynamodb:DescribeStream",
+        ]
+        Resource = "arn:aws:dynamodb:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:table/${var.project}-*-${var.env}/stream/*"
+      },
+      {
+        # dynamodb:ListStreams admits no resource scope.
+        Sid      = "DynamoDbListStreams"
+        Effect   = "Allow"
+        Action   = "dynamodb:ListStreams"
+        Resource = "*"
+      },
+      {
+        # @aws-sdk/client-lambda (14 handlers) — the CRM write/read single-writer
+        # pattern is function-to-function invocation.
+        Sid      = "InvokeSiblingFunctions"
+        Effect   = "Allow"
+        Action   = ["lambda:InvokeFunction"]
+        Resource = "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${var.project}-*-${var.env}"
+      },
+      {
+        # @aws-sdk/client-sfn (7 handlers). SendTaskSuccess/Failure are how the
+        # voice graph resumes after a CALL-E webhook; they are authorised against
+        # the state machine, not the execution.
+        Sid    = "StepFunctions"
+        Effect = "Allow"
+        Action = [
+          "states:StartExecution", "states:DescribeExecution",
+          "states:SendTaskSuccess", "states:SendTaskFailure",
+          "states:SendTaskHeartbeat",
+        ]
+        Resource = [
+          "arn:aws:states:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:stateMachine:${var.project}-*-${var.env}",
+          "arn:aws:states:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:execution:${var.project}-*-${var.env}:*",
+        ]
+      },
+      {
+        # @aws-sdk/client-bedrock-runtime (4 handlers) — InvokeModel + Converse.
+        # Foundation model ARNs are AWS-owned, so this cannot be account-scoped.
+        Sid    = "BedrockInvoke"
+        Effect = "Allow"
+        Action = [
+          "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream",
+          "bedrock:Converse", "bedrock:ConverseStream",
+        ]
+        Resource = "*"
+      },
+      {
+        # @aws-sdk/client-ssm — the *_SSM_PATH env vars above are read at cold
+        # start specifically to avoid module dependency cycles.
+        Sid      = "SsmRead"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"]
+        Resource = "arn:aws:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project}/${var.env}/*"
+      },
+      {
+        # @aws-sdk/client-dsql + DsqlSigner — used by crm-read, crm-write-service,
+        # org-check, registry-seeder, sla-monitor, template-launcher. The signer
+        # mints a connection token; DbConnectAdmin is what authorises it.
+        Sid      = "DsqlConnect"
+        Effect   = "Allow"
+        Action   = ["dsql:DbConnectAdmin", "dsql:DbConnect"]
+        Resource = "arn:aws:dsql:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:cluster/*"
+      },
+      {
+        # @aws-sdk/client-eventbridge — PutEventsCommand
+        Sid      = "EventBridgePut"
+        Effect   = "Allow"
+        Action   = "events:PutEvents"
+        Resource = "arn:aws:events:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:event-bus/${var.project}-*-${var.env}"
+      },
+      {
+        # @aws-sdk/client-appsync — appsync-publisher pushes the live agent feed
+        Sid      = "AppSyncPublish"
+        Effect   = "Allow"
+        Action   = "appsync:GraphQL"
+        Resource = "arn:aws:appsync:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:apis/*"
+      },
+      {
+        # @aws-sdk/client-apigatewaymanagementapi — PostToConnectionCommand from
+        # voice-bridge back to connected WebSocket clients.
+        Sid      = "WebSocketPostBack"
+        Effect   = "Allow"
+        Action   = "execute-api:ManageConnections"
+        Resource = "arn:aws:execute-api:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:*/${var.env}/*"
+      },
+      {
+        # @aws-sdk/client-cognito-identity-provider — AdminAddUserToGroupCommand.
+        # The pool ARN is not available here without a lambda->auth dependency
+        # cycle (the pool id is read from SSM at cold start for the same reason),
+        # so this is scoped to the account's pools in this region.
+        Sid    = "CognitoAdmin"
+        Effect = "Allow"
+        Action = [
+          "cognito-idp:AdminAddUserToGroup", "cognito-idp:AdminGetUser",
+          "cognito-idp:AdminCreateUser", "cognito-idp:AdminSetUserPassword",
+        ]
+        Resource = "arn:aws:cognito-idp:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:userpool/*"
+      },
+    ]
+  })
+}
+
 resource "aws_lambda_function" "fn" {
   for_each = local.functions
 
