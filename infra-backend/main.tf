@@ -11,6 +11,28 @@ provider "aws" { region = var.aws_region }
 locals {
   project = "impulsoiq"
   tags    = { Project = local.project, Env = var.env, ManagedBy = "terraform" }
+
+  # ── Where the web app lives ────────────────────────────────────────────────
+  # infra-web is a SEPARATE Terraform state, so its outputs cannot be read from
+  # here. The naming scheme is deterministic, so it is recomputed instead --
+  # deliberately mirroring infra-web/main.tf's `fqdn` local:
+  #   prod -> impulsoiq.rinegansolutions.com  (apex, plus www)
+  #   dev  -> dev.impulsoiq.rinegansolutions.com
+  #   test -> test.impulsoiq.rinegansolutions.com
+  # If infra-web's subdomain scheme changes, this must change with it. A data
+  # source on SSM would couple the two stacks' apply order, which is worse:
+  # backend would then fail to plan until web had applied.
+  web_zone = "impulsoiq.rinegansolutions.com"
+  web_host = var.env == "prod" ? local.web_zone : "${var.env}.${local.web_zone}"
+
+  # Every origin Cognito may redirect to. prod serves apex AND www, so both are
+  # registered; otherwise a user who arrived via www is bounced to a URL Cognito
+  # does not recognise. localhost is included off-prod so `npm run dev:web`
+  # (Vite, port 5173) can complete a real login.
+  web_base_urls = concat(
+    ["https://${local.web_host}"],
+    var.env == "prod" ? ["https://www.${local.web_zone}"] : ["http://localhost:5173"],
+  )
 }
 
 # ─── Module dependency order ──────────────────────────────────────────────────
@@ -57,6 +79,7 @@ module "auth" {
   tags    = local.tags
 
   crm_write_service_arn = module.lambda.crm_write_service_arn
+  web_base_urls         = local.web_base_urls
 }
 
 # ── API: APIGW, AppSync, SFN, SES, EventBridge rules ─────────────────────────

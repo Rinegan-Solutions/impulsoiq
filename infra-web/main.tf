@@ -14,7 +14,17 @@ provider "aws" {
 
 locals {
   project = "impulsoiq"
-  fqdn    = "${var.subdomain}.impulsoiq.rinegansolutions.com"
+
+  # An empty subdomain serves the zone apex. Prod does exactly that, so the
+  # public address is impulsoiq.rinegansolutions.com -- naming the apex here
+  # rather than "app." is what makes the site reachable at the domain users
+  # will actually type.
+  fqdn = var.subdomain == "" ? var.route53_zone_name : "${var.subdomain}.${var.route53_zone_name}"
+
+  # Extra names served by the same distribution and covered by the same
+  # certificate. Kept as a list so adding another alias is a one-line change.
+  alt_fqdns = var.www_alias ? ["www.${local.fqdn}"] : []
+  all_fqdns = concat([local.fqdn], local.alt_fqdns)
 }
 
 resource "aws_s3_bucket" "web" {
@@ -57,9 +67,12 @@ data "aws_route53_zone" "main" {
 # same Route53 record. Per-environment certs give each a distinct validation
 # record and remove the contention entirely.
 resource "aws_acm_certificate" "web" {
-  provider          = aws.us_east_1
-  domain_name       = local.fqdn
-  validation_method = "DNS"
+  provider = aws.us_east_1
+  # The apex is the primary name; www (when enabled) rides along as a SAN so
+  # both are served by one certificate and one distribution.
+  domain_name               = local.fqdn
+  subject_alternative_names = local.alt_fqdns
+  validation_method         = "DNS"
 
   lifecycle {
     create_before_destroy = true
@@ -98,7 +111,7 @@ resource "aws_acm_certificate_validation" "web" {
 resource "aws_cloudfront_distribution" "web" {
   enabled             = true
   default_root_object = "index.html"
-  aliases             = [local.fqdn]
+  aliases             = local.all_fqdns
 
   origin {
     domain_name              = aws_s3_bucket.web.bucket_regional_domain_name
@@ -143,12 +156,32 @@ resource "aws_cloudfront_distribution" "web" {
 }
 
 # ── Public DNS record ─────────────────────────────────────────────────────────
-# Alias (not CNAME) so the record can sit at any level and costs no extra
-# lookup. Points <subdomain>.impulsoiq.rinegansolutions.com at CloudFront.
+# Alias (not CNAME) so the record can sit at the ZONE APEX -- a CNAME cannot
+# coexist with the apex SOA/NS records, which is precisely why the apex needs
+# an alias here. One record per name in local.all_fqdns.
 resource "aws_route53_record" "web" {
+  for_each = toset(local.all_fqdns)
+
   zone_id = data.aws_route53_zone.main.zone_id
-  name    = local.fqdn
+  name    = each.value
   type    = "A"
+
+  alias {
+    name                   = aws_cloudfront_distribution.web.domain_name
+    zone_id                = aws_cloudfront_distribution.web.hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+
+# IPv6. CloudFront answers on both stacks, and a browser on an IPv6-only
+# network gets no answer at all without a AAAA record -- it does not fall back
+# to the A record.
+resource "aws_route53_record" "web_v6" {
+  for_each = toset(local.all_fqdns)
+
+  zone_id = data.aws_route53_zone.main.zone_id
+  name    = each.value
+  type    = "AAAA"
 
   alias {
     name                   = aws_cloudfront_distribution.web.domain_name
@@ -191,9 +224,19 @@ resource "aws_ssm_parameter" "cloudfront_id" {
   tags  = { Project = local.project, Env = var.env }
 }
 
+# The PUBLIC address, not the CloudFront hostname. A consumer asking for
+# "the web domain" wants the URL a user visits; the dXXXX.cloudfront.net name
+# is an implementation detail and is still available as an output.
 resource "aws_ssm_parameter" "web_domain" {
   name  = "/impulsoiq/${var.env}/web/domain"
   type  = "String"
-  value = aws_cloudfront_distribution.web.domain_name
+  value = local.fqdn
+  tags  = { Project = local.project, Env = var.env }
+}
+
+resource "aws_ssm_parameter" "web_url" {
+  name  = "/impulsoiq/${var.env}/web/url"
+  type  = "String"
+  value = "https://${local.fqdn}"
   tags  = { Project = local.project, Env = var.env }
 }

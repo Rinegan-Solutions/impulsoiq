@@ -16,7 +16,21 @@ variable "env" {
 
 variable "subdomain" {
   type        = string
-  description = "Subdomain prefix for the web app, e.g. 'app' or 'app-dev'."
+  description = <<-EOT
+    Host label under route53_zone_name. An EMPTY STRING means serve at the zone
+    apex, which is what prod does: users go to impulsoiq.rinegansolutions.com,
+    not app.impulsoiq.rinegansolutions.com. Non-prod uses "dev" / "test".
+  EOT
+  default     = ""
+}
+
+variable "www_alias" {
+  type        = bool
+  description = <<-EOT
+    Also serve www.<fqdn> from the same distribution and certificate. Intended
+    for prod at the apex; www.dev.impulsoiq... has no audience.
+  EOT
+  default     = false
 }
 
 variable "route53_zone_name" {

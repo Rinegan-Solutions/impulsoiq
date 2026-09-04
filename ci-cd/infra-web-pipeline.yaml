@@ -831,6 +831,36 @@ Resources:
       Name: !Sub '${AWS::StackName}-nonprod'
       RoleArn: !GetAtt CodePipelineRole.Arn
       PipelineType: V2
+      # Path-filtered trigger. Without this, DetectChanges starts this pipeline
+      # on EVERY push to develop -- so a backend-only change would also run the
+      # web pipeline and vice versa. AWS disables default change detection
+      # automatically whenever a Triggers block is present, so this REPLACES the
+      # DetectChanges behaviour rather than layering on top of it.
+      # Shared roots (packages/, the root package files, tsconfig.base.json) are
+      # listed on BOTH pipelines on purpose: a change there can affect either
+      # build, and a missed deploy is worse than a redundant one.
+      Triggers:
+        - ProviderType: CodeStarSourceConnection
+          GitConfiguration:
+            SourceActionName: SourceDev
+            Push:
+              - Branches:
+                  Includes:
+                    - develop
+                FilePaths:
+                  Includes:
+                    - 'infra-web/**'
+                    - 'apps/web/**'
+                    - 'ci-cd/infra-web-pipeline.yaml'
+                    - 'packages/**'
+                    - 'package.json'
+                    - 'package-lock.json'
+                    - 'tsconfig.base.json'
+                  Excludes:
+                    - 'docs/**'
+                    - '**/*.md'
+                    - 'sample-ci-cd/**'
+                    - 'scripts/**'
       ArtifactStore:
         Type: S3
         Location: !Ref PipelineArtifactsBucket
@@ -1051,6 +1081,36 @@ Resources:
       Name: !Sub '${AWS::StackName}-prod'
       RoleArn: !GetAtt CodePipelineRole.Arn
       PipelineType: V2
+      # Path-filtered trigger. Without this, DetectChanges starts this pipeline
+      # on EVERY push to main -- so a backend-only change would also run the
+      # web pipeline and vice versa. AWS disables default change detection
+      # automatically whenever a Triggers block is present, so this REPLACES the
+      # DetectChanges behaviour rather than layering on top of it.
+      # Shared roots (packages/, the root package files, tsconfig.base.json) are
+      # listed on BOTH pipelines on purpose: a change there can affect either
+      # build, and a missed deploy is worse than a redundant one.
+      Triggers:
+        - ProviderType: CodeStarSourceConnection
+          GitConfiguration:
+            SourceActionName: SourceProd
+            Push:
+              - Branches:
+                  Includes:
+                    - main
+                FilePaths:
+                  Includes:
+                    - 'infra-web/**'
+                    - 'apps/web/**'
+                    - 'ci-cd/infra-web-pipeline.yaml'
+                    - 'packages/**'
+                    - 'package.json'
+                    - 'package-lock.json'
+                    - 'tsconfig.base.json'
+                  Excludes:
+                    - 'docs/**'
+                    - '**/*.md'
+                    - 'sample-ci-cd/**'
+                    - 'scripts/**'
       ArtifactStore:
         Type: S3
         Location: !Ref PipelineArtifactsBucket

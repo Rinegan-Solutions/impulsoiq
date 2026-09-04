@@ -59,8 +59,10 @@ resource "aws_cognito_user_pool_client" "enterprise_sso" {
     var.saml_provider_name,
   ]
 
-  callback_urls = ["https://app.impulsoiq.rinegansolutions.com/auth/callback"]
-  logout_urls   = ["https://app.impulsoiq.rinegansolutions.com/sign-out"]
+  # Derived per environment. Hardcoding the prod host here meant a dev or test
+  # user completing SSO was handed off to the production app.
+  callback_urls = [for u in var.web_base_urls : "${u}/auth/callback"]
+  logout_urls   = [for u in var.web_base_urls : "${u}/sign-out"]
 
   prevent_user_existence_errors = "ENABLED"
   enable_token_revocation       = true
