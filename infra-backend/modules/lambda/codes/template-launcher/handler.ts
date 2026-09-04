@@ -17,7 +17,7 @@
  *   - If daysOverdue >= 30 OR amount >= $5000 → routes to human escalation queue
  *   - The SFN receives a skip_automated_call flag for the agent to read
  */
-import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
+import type { APIGatewayProxyHandler } from 'aws-lambda';
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { DsqlSigner } from '@aws-sdk/dsql-signer';
 import { Client } from 'pg';
@@ -122,8 +122,8 @@ function needsHumanEscalation(
 
 // ── Handler ──────────────────────────────────────────────────────────────────
 
-export const handler: APIGatewayProxyHandlerV2 = async (event) => {
-  const tenantId = event.requestContext.authorizer?.jwt?.claims?.['custom:tenant_id'] as string;
+export const handler: APIGatewayProxyHandler = async (event) => {
+  const tenantId = event.requestContext.authorizer?.tenantId as string | undefined;
   if (!tenantId) return { statusCode: 401, body: JSON.stringify({ error: 'Unauthorized' }) };
 
   const body = JSON.parse(event.body ?? '{}') as {
@@ -187,7 +187,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         ...contextData,
       }),
     }));
-    executions.push(resp.executionArn);
+    if (resp.executionArn) executions.push(resp.executionArn);
   }
 
   return {

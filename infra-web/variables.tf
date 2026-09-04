@@ -18,3 +18,9 @@ variable "subdomain" {
   type        = string
   description = "Subdomain prefix for the web app, e.g. 'app' or 'app-dev'."
 }
+
+variable "route53_zone_name" {
+  type        = string
+  description = "Hosted zone that serves the app FQDNs. Created once as a bootstrap resource and shared by dev/test/prod; Terraform only reads it."
+  default     = "impulsoiq.rinegansolutions.com"
+}

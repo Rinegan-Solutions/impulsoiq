@@ -1,25 +1,39 @@
 version: 0.2
-# Runs terraform plan and outputs the plan file for the apply step.
-# ENV env var must be set by the calling CodeBuild project.
+# Runs terraform plan and emits the plan file consumed by buildspec-apply.yml.
+# ENV is set by the calling CodeBuild project.
+#
+# Same bundling requirement as validate — see buildspec-validate.yml for why
+# dev dependencies must be installed.
+
 phases:
   install:
+    runtime-versions:
+      nodejs: 20
     commands:
-      - yum install -y yum-utils
+      - yum install -y yum-utils zip
       - yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
-      - yum install -y terraform nodejs-20
+      - yum install -y terraform
+
   pre_build:
     commands:
-      # Build Lambda bundles before Terraform plan
+      - cd "$CODEBUILD_SRC_DIR"
+      - npm ci --no-audit --no-fund
       - |
-        for dir in $CODEBUILD_SRC_DIR/infra-backend/modules/lambda/codes/*/; do
-          [ -f "$dir/package.json" ] && cd "$dir" && npm ci && npm run build && cd $CODEBUILD_SRC_DIR
+        set -e
+        for dir in "$CODEBUILD_SRC_DIR"/infra-backend/modules/lambda/codes/*/; do
+          if [ -f "$dir/package.json" ]; then
+            echo "── bundling $(basename "$dir") ──"
+            ( cd "$dir" && npm run build )
+          fi
         done
+
   build:
     commands:
-      - cd $CODEBUILD_SRC_DIR/infra-backend
+      - cd "$CODEBUILD_SRC_DIR/infra-backend"
       - terraform init -backend-config="environments/${ENV}/backend.hcl"
       - terraform plan -var-file="environments/${ENV}/terraform.tfvars" -out=tfplan
       - echo "Plan complete for env=${ENV}"
+
 artifacts:
   files:
     - infra-backend/tfplan

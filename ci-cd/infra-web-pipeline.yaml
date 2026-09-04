@@ -22,7 +22,7 @@ Parameters:
   GitHubOwner:
     Type: String
     Description: GitHub repository owner/username
-    Default: 'Tolu-Orina'
+    Default: 'Rinegan-Solutions'
 
   GitHubRepo:
     Type: String

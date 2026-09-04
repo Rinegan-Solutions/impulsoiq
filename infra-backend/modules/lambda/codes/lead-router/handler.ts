@@ -15,7 +15,7 @@
  * Input:  { tenantId, firstName, lastName, email, company, source, formData? }
  * Output: { contactId, assignedTo, campaignId, agentRunId }
  */
-import type { APIGatewayProxyHandlerV2, Handler } from 'aws-lambda';
+import type { APIGatewayProxyEvent, Handler } from 'aws-lambda';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -188,15 +188,16 @@ async function route(input: LeadRouterInput): Promise<RouteResult> {
 // ── Entry point (API Gateway + direct Lambda invocation) ─────────────────────
 
 export const handler: Handler<
-  LeadRouterInput | Parameters<APIGatewayProxyHandlerV2>[0],
+  LeadRouterInput | APIGatewayProxyEvent,
   RouteResult | { statusCode: number; body: string }
 > = async (event) => {
   let input: LeadRouterInput;
 
   if ('requestContext' in event) {
-    const apigwEvent = event as Parameters<APIGatewayProxyHandlerV2>[0];
-    const jwt = apigwEvent.requestContext?.authorizer?.jwt?.claims;
-    const tenantId = (jwt?.['custom:tenant_id'] as string) ?? null;
+    const apigwEvent = event as APIGatewayProxyEvent;
+    // Flat context from the REST custom authorizer — not JWT claims.
+    const ctx = apigwEvent.requestContext?.authorizer;
+    const tenantId = (ctx?.tenantId as string | undefined) ?? null;
     if (!tenantId) return { statusCode: 401, body: JSON.stringify({ error: 'Missing tenant_id' }) };
     const body = JSON.parse(apigwEvent.body ?? '{}') as Omit<LeadRouterInput, 'tenantId'>;
     input = { ...body, tenantId };

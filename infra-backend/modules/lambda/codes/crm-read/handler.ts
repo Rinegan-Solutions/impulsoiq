@@ -7,7 +7,7 @@
  * Tenant isolation: every query includes a tenant_id parameter.
  * Supports both API Gateway and direct Lambda invocation from agents.
  */
-import type { APIGatewayProxyHandlerV2, Handler } from 'aws-lambda';
+import type { APIGatewayProxyEvent, Handler } from 'aws-lambda';
 import { getDb } from './db';
 
 type Operation =
@@ -51,10 +51,12 @@ interface ReadResponse {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function tenantFromEvent(event: Parameters<APIGatewayProxyHandlerV2>[0]): string | null {
-  const jwt = event.requestContext?.authorizer?.jwt?.claims;
-  if (jwt?.['custom:tenant_id']) return jwt['custom:tenant_id'] as string;
-  return null;
+// The REST API's custom authorizer (auth-authorizer) returns a FLAT context
+// map — { tenantId, userId, groups, isAdmin } — not an HTTP-API JWT claims
+// object. There is no `.jwt.claims` here.
+function tenantFromEvent(event: APIGatewayProxyEvent): string | null {
+  const ctx = event.requestContext?.authorizer;
+  return (ctx?.tenantId as string | undefined) ?? null;
 }
 
 // ── Operations ────────────────────────────────────────────────────────────────
@@ -133,15 +135,15 @@ async function getActiveCampaigns(db: Awaited<ReturnType<typeof getDb>>, tenantI
 
 export const handler: Handler<
   { operation: Operation; payload: Record<string, unknown>; tenantId?: string }
-  | Parameters<APIGatewayProxyHandlerV2>[0],
-  ReadResponse | { statusCode: number; body: string }
+  | APIGatewayProxyEvent,
+  unknown
 > = async (event) => {
   let tenantId: string | null = null;
   let req: ReadRequest;
 
   if ('requestContext' in event) {
     // API Gateway path
-    const apigwEvent = event as Parameters<APIGatewayProxyHandlerV2>[0];
+    const apigwEvent = event as APIGatewayProxyEvent;
     tenantId = tenantFromEvent(apigwEvent);
     if (!tenantId) return { statusCode: 401, body: JSON.stringify({ error: 'Missing tenant_id' }) };
     req = JSON.parse(apigwEvent.body ?? '{}') as ReadRequest;

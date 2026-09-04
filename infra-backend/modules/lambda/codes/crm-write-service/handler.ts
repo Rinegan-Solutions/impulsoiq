@@ -7,7 +7,7 @@
  * Tenant isolation: every query includes a tenant_id parameter.
  * OCC retries: DSQL can surface OCC errors; callers should retry with backoff.
  */
-import type { APIGatewayProxyHandlerV2, Handler } from 'aws-lambda';
+import type { APIGatewayProxyEvent, Handler } from 'aws-lambda';
 import { getDb, closeDb } from './db';
 import { publishEvent } from './events';
 
@@ -49,11 +49,10 @@ interface WriteResponse {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function tenantFromEvent(event: Parameters<APIGatewayProxyHandlerV2>[0]): string | null {
-  // From API Gateway JWT authorizer (human callers)
-  const jwt = event.requestContext?.authorizer?.jwt?.claims;
-  if (jwt?.['custom:tenant_id']) return jwt['custom:tenant_id'] as string;
-  return null;
+function tenantFromEvent(event: APIGatewayProxyEvent): string | null {
+  // REST API custom authorizer puts a flat context here, not JWT claims.
+  const ctx = event.requestContext?.authorizer;
+  return (ctx?.tenantId as string | undefined) ?? null;
 }
 
 function iso(d?: unknown): string {
@@ -275,8 +274,8 @@ async function upsertTenant(db: ReturnType<typeof getDb> extends Promise<infer T
 
 export const handler: Handler<
   { operation: Operation; payload: Record<string, unknown>; tenantId?: string; actorType?: string; actorId?: string }
-  | Parameters<APIGatewayProxyHandlerV2>[0],
-  WriteResponse | { statusCode: number; body: string }
+  | APIGatewayProxyEvent,
+  unknown
 > = async (event) => {
   // Support two invocation modes:
   // 1. Via API Gateway (human UI) — tenantId from JWT claims
@@ -286,7 +285,7 @@ export const handler: Handler<
 
   if ('requestContext' in event) {
     // API Gateway path
-    const apigwEvent = event as Parameters<APIGatewayProxyHandlerV2>[0];
+    const apigwEvent = event as APIGatewayProxyEvent;
     tenantId = tenantFromEvent(apigwEvent);
     if (!tenantId) return { statusCode: 401, body: JSON.stringify({ error: 'Missing tenant_id' }) };
     req = JSON.parse(apigwEvent.body ?? '{}') as WriteRequest;

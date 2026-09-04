@@ -1,11 +1,11 @@
-import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
+import type { APIGatewayProxyHandler } from 'aws-lambda';
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 
 const sfn = new SFNClient({});
 const STATE_MACHINE_ARN = process.env.STATE_MACHINE_ARN!;
 
-export const handler: APIGatewayProxyHandlerV2 = async (event) => {
-  const tenantId = event.requestContext.authorizer?.jwt?.claims?.['custom:tenant_id'];
+export const handler: APIGatewayProxyHandler = async (event) => {
+  const tenantId = event.requestContext.authorizer?.tenantId as string | undefined;
   const body = JSON.parse(event.body ?? '{}') as { campaignId: string; contactIds: string[] };
 
   const executions = await Promise.all(

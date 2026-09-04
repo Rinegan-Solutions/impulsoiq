@@ -1,0 +1,16 @@
+{
+  // Node 20 Lambda bundled by esbuild. Type-check only — esbuild emits the
+  // JavaScript, so noEmit is always on here.
+  "extends": "../../../../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "types": ["node", "aws-lambda"],
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["*.ts"]
+}
