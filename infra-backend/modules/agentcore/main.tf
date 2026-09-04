@@ -3,6 +3,13 @@
 # All AgentCore Runtime containers target ARM64 (aarch64).
 
 locals {
+  # NOTE: AgentCore naming rules differ per resource, in opposite directions.
+  #   agent_runtime_name    [a-zA-Z0-9_], max 48  — underscores, NO hyphens
+  #   gateway_target.name   ^([0-9a-zA-Z][-]?)+$  — hyphens, NO underscores
+  # The agent keys below keep hyphens because they also name ECR repositories
+  # and source directories. agent_runtime_name converts them with replace();
+  # everything else uses them as-is. Longest runtime name is
+  # impulsoiq_research_enrichment_prod (34 chars), inside the 48 limit.
   agents = {
     coordinator         = { description = "Plans, decomposes, orchestrates all other agents" }
     clarification       = { description = "Turns ambiguous goals into fully-specified ones" }
@@ -140,7 +147,7 @@ resource "aws_bedrockagentcore_memory" "main" {
 resource "aws_bedrockagentcore_agent_runtime" "agent" {
   for_each = local.agents
 
-  agent_runtime_name = "${var.project}-${each.key}-${var.env}"
+  agent_runtime_name = replace("${var.project}_${each.key}_${var.env}", "-", "_")
   description        = each.value.description
   role_arn           = aws_iam_role.agentcore_runtime.arn
 
