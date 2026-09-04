@@ -80,18 +80,21 @@ module "api" {
   send_pause_enforcer_arn       = module.lambda.function_arns["send-pause-enforcer"]
   nurture_trigger_lambda_arn    = module.lambda.function_arns["nurture-trigger"]
   agents_event_bus_name         = module.data.event_bus_name
-  # Phase 3 scheduler targets — agentcore runtime IDs used as Lambda ARN proxies
-  forecasting_agent_lambda_arn  = module.agentcore.forecasting_insight_runtime_arn
-  hygiene_agent_lambda_arn      = module.agentcore.data_hygiene_runtime_arn
+  # Phase 3 scheduler targets. These are AgentCore RUNTIME arns, not Lambda
+  # arns -- the schedules target agent_invoker_lambda_arn and pass these in
+  # the payload, because Scheduler has no bedrock-agentcore target type.
+  agent_invoker_lambda_arn      = module.lambda.function_arns["agent-invoker"]
+  forecasting_agent_runtime_arn = module.agentcore.forecasting_insight_runtime_arn
+  hygiene_agent_runtime_arn     = module.agentcore.data_hygiene_runtime_arn
   evaluations_runner_lambda_arn = module.lambda.function_arns["evaluations-runner"]
   # Phase 4
   voice_bridge_lambda_arn = module.lambda.function_arns["voice-bridge"]
   # Phase 4C — disabled by default until legal review is complete per source
-  signal_listening_lambda_arn = module.agentcore.signal_listening_runtime_arn
+  signal_listening_runtime_arn = module.agentcore.signal_listening_runtime_arn
   # Phase 7
   sla_monitor_lambda_arn = module.lambda.function_arns["sla-monitor"]
   # Phase 9 — runs Sunday 05:00, before Forecasting Agent (07:00), so support signals are ready
-  support_insight_lambda_arn = module.agentcore.support_insight_runtime_arn
+  support_insight_runtime_arn = module.agentcore.support_insight_runtime_arn
 }
 
 # ── Support (Amazon Connect + queues + contact flows) — Phase 7 ───────────────

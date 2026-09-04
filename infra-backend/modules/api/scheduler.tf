@@ -31,10 +31,13 @@ resource "aws_iam_role_policy" "scheduler" {
       Sid    = "InvokeAgents"
       Effect = "Allow"
       Action = "lambda:InvokeFunction"
+      # Only real Lambdas are listed. Agent runs go through
+      # agent_invoker_lambda_arn, which then calls the AgentCore data plane
+      # under the Lambda execution role -- Scheduler never touches AgentCore.
       Resource = [
-        var.forecasting_agent_lambda_arn,
-        var.hygiene_agent_lambda_arn,
+        var.agent_invoker_lambda_arn,
         var.evaluations_runner_lambda_arn,
+        var.sla_monitor_lambda_arn,
       ]
     }]
   })
@@ -55,12 +58,17 @@ resource "aws_scheduler_schedule" "forecasting_daily" {
   schedule_expression_timezone = "UTC"
 
   target {
-    arn      = var.forecasting_agent_lambda_arn
+    # Targets the agent-invoker shim, NOT the agent directly:
+    # EventBridge Scheduler has no bedrock-agentcore target type.
+    arn      = var.agent_invoker_lambda_arn
     role_arn = aws_iam_role.scheduler.arn
 
     input = jsonencode({
-      tenantId   = "__ALL__"
-      reportType = "pipeline_forecast"
+      agentRuntimeArn = var.forecasting_agent_runtime_arn
+      payload = {
+        tenantId   = "__ALL__"
+        reportType = "pipeline_forecast"
+      }
     })
 
     retry_policy {
@@ -85,11 +93,16 @@ resource "aws_scheduler_schedule" "hygiene_weekly" {
   schedule_expression_timezone = "UTC"
 
   target {
-    arn      = var.hygiene_agent_lambda_arn
+    # Targets the agent-invoker shim, NOT the agent directly:
+    # EventBridge Scheduler has no bedrock-agentcore target type.
+    arn      = var.agent_invoker_lambda_arn
     role_arn = aws_iam_role.scheduler.arn
 
     input = jsonencode({
-      tenantId = "__ALL__"
+      agentRuntimeArn = var.hygiene_agent_runtime_arn
+      payload = {
+        tenantId = "__ALL__"
+      }
     })
 
     retry_policy {
@@ -147,12 +160,17 @@ resource "aws_scheduler_schedule" "signal_listening_hourly" {
   state = "DISABLED"
 
   target {
-    arn      = var.signal_listening_lambda_arn
+    # Targets the agent-invoker shim, NOT the agent directly:
+    # EventBridge Scheduler has no bedrock-agentcore target type.
+    arn      = var.agent_invoker_lambda_arn
     role_arn = aws_iam_role.scheduler.arn
 
     input = jsonencode({
-      tenantId = "__ALL__"
-      dryRun   = false
+      agentRuntimeArn = var.signal_listening_runtime_arn
+      payload = {
+        tenantId = "__ALL__"
+        dryRun   = false
+      }
     })
 
     retry_policy {
@@ -200,12 +218,17 @@ resource "aws_scheduler_schedule" "support_insight_weekly" {
   schedule_expression_timezone = "UTC"
 
   target {
-    arn      = var.support_insight_lambda_arn
+    # Targets the agent-invoker shim, NOT the agent directly:
+    # EventBridge Scheduler has no bedrock-agentcore target type.
+    arn      = var.agent_invoker_lambda_arn
     role_arn = aws_iam_role.scheduler.arn
 
     input = jsonencode({
-      tenantId   = "__ALL__"
-      periodDays = 30
+      agentRuntimeArn = var.support_insight_runtime_arn
+      payload = {
+        tenantId   = "__ALL__"
+        periodDays = 30
+      }
     })
 
     retry_policy {

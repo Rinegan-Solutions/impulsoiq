@@ -65,13 +65,13 @@ variable "nurture_trigger_lambda_arn" {
 }
 
 # Phase 3 scheduler targets
-variable "forecasting_agent_lambda_arn" {
+variable "forecasting_agent_runtime_arn" {
   type        = string
   default     = ""
   description = "ARN of the forecasting-insight agent Lambda wrapper (scheduled daily)"
 }
 
-variable "hygiene_agent_lambda_arn" {
+variable "hygiene_agent_runtime_arn" {
   type        = string
   default     = ""
   description = "ARN of the data-hygiene agent Lambda wrapper (scheduled weekly)"
@@ -91,7 +91,7 @@ variable "voice_bridge_lambda_arn" {
 }
 
 # Phase 4C
-variable "signal_listening_lambda_arn" {
+variable "signal_listening_runtime_arn" {
   type        = string
   default     = ""
   description = "ARN of the Signal Listening Agent runtime (hourly scheduler target)"
@@ -105,8 +105,16 @@ variable "sla_monitor_lambda_arn" {
 }
 
 # Phase 9
-variable "support_insight_lambda_arn" {
+variable "support_insight_runtime_arn" {
   type        = string
   default     = ""
   description = "ARN of the Support Insight Agent runtime (weekly scheduler target)"
+}
+
+# The agent-invoker Lambda. EventBridge Scheduler cannot target a
+# bedrock-agentcore runtime, so every scheduled agent run goes through this
+# shim with the agent's ARN in the payload.
+variable "agent_invoker_lambda_arn" {
+  type        = string
+  description = "ARN of the agent-invoker Lambda that calls AgentCore InvokeAgentRuntime"
 }

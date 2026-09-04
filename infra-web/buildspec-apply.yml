@@ -67,9 +67,27 @@ phases:
     commands:
       # post_build runs even when build FAILED, so branch on
       # CODEBUILD_BUILD_SUCCEEDING rather than reporting success unconditionally.
+      #
+      # The outputs file must be written on BOTH paths. CodePipeline declares
+      # TerraformDeployOutput<Env> as this action's output artifact, and the
+      # downstream WebAppBuild takes it as a secondary input. With no artifacts
+      # block at all, nothing was uploaded and WebAppBuild died before it
+      # started, with "NoSuchKey ... for secondary source TerraformDeployOutput".
       - |
+        cd "$CODEBUILD_SRC_DIR/infra-web"
         if [ "$CODEBUILD_BUILD_SUCCEEDING" = "1" ]; then
           echo "Apply complete for env=${ENV}"
+          terraform output -json > terraform-outputs.json
         else
-          echo "Apply FAILED for env=${ENV}"
+          echo "Apply FAILED for env=${ENV} - not exporting outputs."
+          echo '{}' > terraform-outputs.json
         fi
+
+# WebAppBuild does not read this file -- it discovers the bucket, distribution
+# and backend URLs from SSM, which infra-web's Terraform writes. The artifact
+# exists to satisfy the pipeline's declared dependency and to leave a record of
+# what the apply produced.
+artifacts:
+  files:
+    - infra-web/terraform-outputs.json
+  discard-paths: no

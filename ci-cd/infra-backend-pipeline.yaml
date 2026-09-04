@@ -264,6 +264,15 @@ Resources:
                 Action:
                   - states:*
                 Resource: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:impulsoiq-*-dev'
+              # ValidateStateMachineDefinition is evaluated against
+              # stateMachine:* -- there is no state machine yet when a definition
+              # is validated, so it cannot be scoped to the impulsoiq-*-<env>
+              # name pattern above.
+              - Sid: StepFunctionsValidateDev
+                Effect: Allow
+                Action:
+                  - states:ValidateStateMachineDefinition
+                Resource: '*'
               - Sid: EventBridgeDev
                 Effect: Allow
                 Action:
@@ -508,6 +517,15 @@ Resources:
                 Action:
                   - states:*
                 Resource: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:impulsoiq-*-test'
+              # ValidateStateMachineDefinition is evaluated against
+              # stateMachine:* -- there is no state machine yet when a definition
+              # is validated, so it cannot be scoped to the impulsoiq-*-<env>
+              # name pattern above.
+              - Sid: StepFunctionsValidateTest
+                Effect: Allow
+                Action:
+                  - states:ValidateStateMachineDefinition
+                Resource: '*'
               - Sid: EventBridgeTest
                 Effect: Allow
                 Action:
@@ -752,6 +770,15 @@ Resources:
                 Action:
                   - states:*
                 Resource: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:impulsoiq-*-prod'
+              # ValidateStateMachineDefinition is evaluated against
+              # stateMachine:* -- there is no state machine yet when a definition
+              # is validated, so it cannot be scoped to the impulsoiq-*-<env>
+              # name pattern above.
+              - Sid: StepFunctionsValidateProd
+                Effect: Allow
+                Action:
+                  - states:ValidateStateMachineDefinition
+                Resource: '*'
               - Sid: EventBridgeProd
                 Effect: Allow
                 Action:

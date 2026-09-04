@@ -366,9 +366,11 @@ resource "aws_bedrockagentcore_gateway_target" "crm_write" {
     }
   }
 
+  # Lambda targets accept ONLY the GATEWAY_IAM_ROLE provider type -- the gateway
+  # calls the Lambda as itself, using aws_iam_role.agentcore_runtime. The
+  # caller_iam_credentials block maps to a different provider type and is
+  # rejected outright for Lambda targets.
   credential_provider_configuration {
-    caller_iam_credentials {
-      service = "lambda"
-    }
+    gateway_iam_role {}
   }
 }

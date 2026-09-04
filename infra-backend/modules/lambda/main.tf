@@ -32,6 +32,11 @@ locals {
     sla-monitor    = { handler = "handler.handler", timeout = 120, memory = 256 }
     # Phase 8
     csat-capture = { handler = "handler.handler", timeout = 15, memory = 128 }
+    # Shim: AgentCore runtimes are not Lambdas and cannot be targeted by
+    # EventBridge Scheduler or invoked with lambda:InvokeFunction. Anything that
+    # needs to run an agent calls this and passes the agent ARN in the payload.
+    # Timeout matches the longest scheduled agent run (deep research).
+    agent-invoker = { handler = "handler.handler", timeout = 300, memory = 256 }
     # tenant-provisioner is created in modules/auth (needs cognito pool ARN); listed here
     # only so its dist.zip is built by the same buildspec loop.
   }
@@ -128,6 +133,17 @@ resource "aws_iam_role_policy" "lambda" {
         Resource = [
           "arn:aws:states:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:stateMachine:${var.project}-*-${var.env}",
           "arn:aws:states:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:execution:${var.project}-*-${var.env}:*",
+        ]
+      },
+      {
+        # agent-invoker calls the AgentCore DATA plane. This is a different
+        # service from bedrock: InvokeAgentRuntime, not InvokeModel.
+        Sid    = "InvokeAgentRuntimes"
+        Effect = "Allow"
+        Action = ["bedrock-agentcore:InvokeAgentRuntime"]
+        Resource = [
+          "arn:aws:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:runtime/${var.project}_*_${var.env}",
+          "arn:aws:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:runtime/${var.project}_*_${var.env}/*",
         ]
       },
       {
