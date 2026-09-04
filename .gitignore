@@ -21,7 +21,10 @@ dist.zip
 
 # ── Terraform ─────────────────────────────────────────────────────────────────
 .terraform/
-.terraform.lock.hcl
+# .terraform.lock.hcl IS committed on purpose. A saved plan is only valid
+# against the provider versions that produced it, so plan and apply must
+# resolve identically — without the lock they can drift (6.62.0 vs 6.63.0)
+# and apply rejects the plan.
 terraform.tfstate
 terraform.tfstate.backup
 *.tfplan

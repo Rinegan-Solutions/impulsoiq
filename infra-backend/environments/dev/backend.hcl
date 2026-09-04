@@ -1,5 +1,7 @@
 bucket         = "impulsoiq-tf-state"
 key            = "infra-backend/dev/terraform.tfstate"
 region         = "eu-west-2"
-dynamodb_table = "impulsoiq-tf-lock"
+# S3 conditional writes hold the state lock (Terraform 1.10+). The old
+# dynamodb_table setting is deprecated and needs a separate lock table.
+use_lockfile   = true
 encrypt        = true

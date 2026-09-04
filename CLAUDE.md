@@ -91,7 +91,7 @@ CodeBuild IAM role — no `AdministratorAccess` anywhere.
 ### Environments folder — Terraform per-env config
 ```
 infra-backend/environments/{dev,test,prod}/
-  backend.hcl      — backend bucket/key/region/dynamodb (used with -backend-config)
+  backend.hcl      — bucket/key/region + use_lockfile (used with -backend-config)
   terraform.tfvars — env, aws_region (used with -var-file)
 
 infra-web/environments/{dev,test,prod}/
