@@ -56,7 +56,28 @@ phases:
         fi
 
         echo "Found plan: $PLAN"
+        PLANDIR=$(dirname "$PLAN")
         cp "$PLAN" "$CODEBUILD_SRC_DIR/infra-backend/tfplan"
+
+        # Restore the Lambda bundles the plan was computed against. apply
+        # re-evaluates filebase64sha256() on every dist.zip, so these must be
+        # the exact bytes from the plan stage -- not a rebuild.
+        ZIPS=0
+        for z in "$PLANDIR"/modules/lambda/codes/*/dist.zip; do
+          [ -f "$z" ] || continue
+          fn=$(basename "$(dirname "$z")")
+          mkdir -p "$CODEBUILD_SRC_DIR/infra-backend/modules/lambda/codes/$fn"
+          cp "$z" "$CODEBUILD_SRC_DIR/infra-backend/modules/lambda/codes/$fn/dist.zip"
+          ZIPS=$((ZIPS + 1))
+        done
+        echo "Restored $ZIPS Lambda bundle(s) from the plan artifact."
+
+        EXPECTED=$(find "$CODEBUILD_SRC_DIR/infra-backend/modules/lambda/codes"                      -mindepth 2 -maxdepth 2 -name package.json | wc -l)
+        if [ "$ZIPS" -ne "$EXPECTED" ]; then
+          echo "ERROR: $EXPECTED Lambda(s) have a package.json but only $ZIPS bundle(s) arrived."
+          echo "The plan stage must publish infra-backend/modules/lambda/codes/*/dist.zip."
+          exit 1
+        fi
 
   build:
     commands:

@@ -65,6 +65,15 @@ Each template defines BOTH pipelines: `NonProdPipeline` (develop → dev → tes
 and `ProdPipeline` (main → prod, double-gated), sharing one artifact bucket and
 one CodePipeline role.
 
+Run the account bootstrap once per AWS account/region before the first deploy.
+It creates the Terraform state bucket and the account-global API Gateway
+CloudWatch Logs role (which is deliberately not in any environment's Terraform
+state, since API Gateway stores only one such role ARN per account per region):
+
+```bash
+./scripts/bootstrap-account.sh eu-west-2      # idempotent; needs admin creds
+```
+
 ```bash
 # Backend pipelines (dev + test + prod)
 aws cloudformation deploy \

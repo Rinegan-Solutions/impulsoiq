@@ -37,4 +37,11 @@ phases:
 artifacts:
   files:
     - infra-backend/tfplan
+    # The dist.zip bundles built in pre_build MUST travel with the plan.
+    # terraform apply re-evaluates the config, so filebase64sha256() runs
+    # again on every Lambda zip. If apply rebuilt them instead of reusing
+    # these, esbuild output could differ and the saved plan would no longer
+    # match. Shipping the exact bytes the plan was computed against is the
+    # only way apply stays faithful to what was approved.
+    - infra-backend/modules/lambda/codes/*/dist.zip
   discard-paths: no

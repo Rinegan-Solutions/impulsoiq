@@ -1,16 +1,29 @@
-# ── SES domain identity and reputation monitoring ────────────────────────────
-# Domain: impulsoiq.rinegansolutions.com
-# SES configuration set tracks bounces and complaints. CloudWatch alarms
-# fire when reputation thresholds are exceeded, triggering the send-pause-enforcer
-# Lambda to halt outbound sending for 24 hours.
-
-resource "aws_ses_domain_identity" "main" {
-  domain = "impulsoiq.rinegansolutions.com"
+# ── SES sending identity and reputation monitoring ───────────────────────────
+# Sends from: noreply@impulsoiq.rinegansolutions.com
+#
+# WHY THERE IS NO aws_ses_domain_identity RESOURCE HERE
+# rinegansolutions.com is already a verified SES identity in this account and
+# region, with DKIM enabled and verified. SES treats a verified domain as
+# covering every subdomain, so mail from impulsoiq.rinegansolutions.com is
+# already authorised and DKIM-signed under the parent's keys — verifying the
+# subdomain separately buys nothing.
+#
+# It would also actively cause harm: an SES identity is one account-level
+# resource, so dev, test and prod would each claim ownership of it, and
+# `terraform destroy` in any single environment would un-verify the domain for
+# the other two. The parent identity is deliberately managed outside this
+# stack.
+#
+# The data source below is an assertion, not a creation: if the parent identity
+# is ever missing, plan fails here with a clear cause rather than every send
+# failing at runtime.
+data "aws_ses_domain_identity" "sending" {
+  domain = "rinegansolutions.com"
 }
 
-resource "aws_ses_domain_dkim" "main" {
-  domain = aws_ses_domain_identity.main.domain
-}
+# The configuration set IS per-environment and correctly owned here — it tracks
+# bounces and complaints, and the CloudWatch alarms below fire the
+# send-pause-enforcer Lambda to halt outbound sending for 24 hours.
 
 resource "aws_ses_configuration_set" "main" {
   name = "impulsoiq-${var.env}"

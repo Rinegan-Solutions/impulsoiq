@@ -4,10 +4,14 @@ Description: 'ImpulsoIQ Backend Infra CI/CD Pipeline - CodePipeline with GitHub,
 # ─── Pre-flight ────────────────────────────────────────────────────────────────
 # 1. SSM parameter must exist (AVAILABLE status):
 #      /impulsoiq/cicd/codeconnections_arn
-# 2. Terraform state bucket:
-#      aws s3 mb s3://impulsoiq-tf-state --region eu-west-2
-#    No lock table is needed: backend.hcl sets use_lockfile = true, so the
-#    state lock is an S3 conditional write on <key>.tflock in the same bucket.
+# 2. Account bootstrap (state bucket + API Gateway CloudWatch role):
+#      ./scripts/bootstrap-account.sh eu-west-2
+#    Idempotent, needs admin credentials, run once per account/region.
+#    - No lock table is needed: backend.hcl sets use_lockfile = true, so the
+#      state lock is an S3 conditional write on <key>.tflock in the same bucket.
+#    - The API Gateway CloudWatch role is account-global, so it is NOT in any
+#      environment's Terraform state. Without it, creating the WebSocket stage
+#      fails with "CloudWatch Logs role ARN must be set in account settings".
 #
 # Deploy (one stack, both pipelines):
 #   aws cloudformation deploy \
@@ -315,6 +319,24 @@ Resources:
                   - appsync:*
                   - dsql:*
                   - connect:*
+                  # SES: the domain identity and configuration set in
+                  # modules/api/ses.tf. Not scopeable per environment -- the
+                  # domain identity is one shared account-level resource.
+                  - ses:*
+                  # Directory Service: connect:CreateInstance provisions an
+                  # identity-pool directory behind the scenes. Without these the
+                  # API fails with "User is not authorized to perform Check
+                  # Alias operation", which names no IAM action at all.
+                  # Source: Connect admin guide, "Create instance" permissions.
+                  - ds:CheckAlias
+                  - ds:CreateAlias
+                  - ds:CreateIdentityPoolDirectory
+                  - ds:AuthorizeApplication
+                  - ds:UnauthorizeApplication
+                  - ds:DescribeDirectories
+                  - ds:DeleteDirectory
+                  # Connect checks its instance quota before creating.
+                  - servicequotas:GetServiceQuota
                   - cloudtrail:*
                   - kms:*
                   - secretsmanager:*
@@ -330,6 +352,23 @@ Resources:
                   - logs:DescribeMetricFilters
                   - logs:PutMetricFilter
                   - logs:DeleteMetricFilter
+                Resource: '*'
+              # Connect and SES create their own service-linked roles under
+              # role/aws-service-role/*, which the impulsoiq-*-<env> scope on
+              # IamScoped* deliberately does not cover.
+              - Sid: ServiceLinkedRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                  - iam:PutRolePolicy
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*'
+              # connect:CreateInstance enumerates buckets to place its default
+              # storage; ListAllMyBuckets cannot be scoped to a prefix.
+              - Sid: ListBucketsForConnect
+                Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
                 Resource: '*'
               - Sid: CodeBuildLogs
                 Effect: Allow
@@ -506,6 +545,24 @@ Resources:
                   - appsync:*
                   - dsql:*
                   - connect:*
+                  # SES: the domain identity and configuration set in
+                  # modules/api/ses.tf. Not scopeable per environment -- the
+                  # domain identity is one shared account-level resource.
+                  - ses:*
+                  # Directory Service: connect:CreateInstance provisions an
+                  # identity-pool directory behind the scenes. Without these the
+                  # API fails with "User is not authorized to perform Check
+                  # Alias operation", which names no IAM action at all.
+                  # Source: Connect admin guide, "Create instance" permissions.
+                  - ds:CheckAlias
+                  - ds:CreateAlias
+                  - ds:CreateIdentityPoolDirectory
+                  - ds:AuthorizeApplication
+                  - ds:UnauthorizeApplication
+                  - ds:DescribeDirectories
+                  - ds:DeleteDirectory
+                  # Connect checks its instance quota before creating.
+                  - servicequotas:GetServiceQuota
                   - cloudtrail:*
                   - kms:*
                   - secretsmanager:*
@@ -521,6 +578,23 @@ Resources:
                   - logs:DescribeMetricFilters
                   - logs:PutMetricFilter
                   - logs:DeleteMetricFilter
+                Resource: '*'
+              # Connect and SES create their own service-linked roles under
+              # role/aws-service-role/*, which the impulsoiq-*-<env> scope on
+              # IamScoped* deliberately does not cover.
+              - Sid: ServiceLinkedRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                  - iam:PutRolePolicy
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*'
+              # connect:CreateInstance enumerates buckets to place its default
+              # storage; ListAllMyBuckets cannot be scoped to a prefix.
+              - Sid: ListBucketsForConnect
+                Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
                 Resource: '*'
               - Sid: CodeBuildLogs
                 Effect: Allow
@@ -697,6 +771,24 @@ Resources:
                   - appsync:*
                   - dsql:*
                   - connect:*
+                  # SES: the domain identity and configuration set in
+                  # modules/api/ses.tf. Not scopeable per environment -- the
+                  # domain identity is one shared account-level resource.
+                  - ses:*
+                  # Directory Service: connect:CreateInstance provisions an
+                  # identity-pool directory behind the scenes. Without these the
+                  # API fails with "User is not authorized to perform Check
+                  # Alias operation", which names no IAM action at all.
+                  # Source: Connect admin guide, "Create instance" permissions.
+                  - ds:CheckAlias
+                  - ds:CreateAlias
+                  - ds:CreateIdentityPoolDirectory
+                  - ds:AuthorizeApplication
+                  - ds:UnauthorizeApplication
+                  - ds:DescribeDirectories
+                  - ds:DeleteDirectory
+                  # Connect checks its instance quota before creating.
+                  - servicequotas:GetServiceQuota
                   - cloudtrail:*
                   - kms:*
                   - secretsmanager:*
@@ -712,6 +804,23 @@ Resources:
                   - logs:DescribeMetricFilters
                   - logs:PutMetricFilter
                   - logs:DeleteMetricFilter
+                Resource: '*'
+              # Connect and SES create their own service-linked roles under
+              # role/aws-service-role/*, which the impulsoiq-*-<env> scope on
+              # IamScoped* deliberately does not cover.
+              - Sid: ServiceLinkedRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                  - iam:PutRolePolicy
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*'
+              # connect:CreateInstance enumerates buckets to place its default
+              # storage; ListAllMyBuckets cannot be scoped to a prefix.
+              - Sid: ListBucketsForConnect
+                Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
                 Resource: '*'
               - Sid: CodeBuildLogs
                 Effect: Allow

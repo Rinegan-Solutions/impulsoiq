@@ -53,12 +53,28 @@ resource "aws_kms_alias" "agentcore" {
 resource "aws_iam_role" "agentcore_runtime" {
   name = "${var.project}-agentcore-runtime-${var.env}"
 
+  # The principal is bedrock-agentcore.amazonaws.com, NOT bedrock.amazonaws.com.
+  # AgentCore is a separate service from Bedrock model inference and assumes
+  # this role under its own principal. With the wrong one, CreateGateway fails
+  # with "Gateway service is not authorized to perform AssumeRole on Gateway
+  # role" -- an authorization error that reads like a missing permission but is
+  # really a trust-policy mismatch.
+  #
+  # The condition is aws:SourceAccount only. AWS also suggests pinning
+  # aws:SourceArn to the gateway, but that ARN does not exist until the gateway
+  # is created with this role -- a cycle. SourceAccount still closes the
+  # cross-account confused-deputy hole, which is what the condition is for.
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
       Effect    = "Allow"
-      Principal = { Service = "bedrock.amazonaws.com" }
+      Principal = { Service = "bedrock-agentcore.amazonaws.com" }
       Action    = "sts:AssumeRole"
+      Condition = {
+        StringEquals = {
+          "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+        }
+      }
     }]
   })
 
