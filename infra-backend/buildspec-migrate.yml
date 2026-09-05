@@ -92,7 +92,15 @@ phases:
       - |
         set -euo pipefail
         . /tmp/dsql.env
-        PSQL="psql host=${DSQL_ENDPOINT} port=5432 dbname=postgres user=admin sslmode=require"
+        # A FUNCTION, not a string variable. The conninfo is a SINGLE psql
+        # argument; holding it in PSQL="psql host=... port=5432 ..." and calling
+        # $PSQL word-splits it, so psql reads "host=..." as the entire conninfo
+        # and discards the rest -- which is why the last run reported
+        # "extra command-line argument ... ignored" and then authenticated as
+        # user "port=5432" with SSL dropped.
+        run_psql() {
+          psql "host=${DSQL_ENDPOINT} port=5432 dbname=postgres user=admin sslmode=require" "$@"
+        }
 
         # Aurora DSQL builds every secondary index ASYNCHRONOUSLY -- CREATE INDEX
         # ASYNC returns a job id immediately and the index is INVALID until the
@@ -102,16 +110,16 @@ phases:
         # (call_result.idempotency_key) that do not enforce anything until valid.
         echo "── waiting for index builds ──"
         for i in $(seq 1 60); do
-          PENDING=$($PSQL -tAc             "SELECT count(*) FROM sys.jobs
+          PENDING=$(run_psql -tAc             "SELECT count(*) FROM sys.jobs
               WHERE job_type = 'INDEX_BUILD' AND status IN ('submitted','processing')")
-          FAILED=$($PSQL -tAc             "SELECT count(*) FROM sys.jobs
+          FAILED=$(run_psql -tAc             "SELECT count(*) FROM sys.jobs
               WHERE job_type = 'INDEX_BUILD' AND status = 'failed'")
 
           if [ "$FAILED" != "0" ]; then
             echo "ERROR: $FAILED index build(s) failed."
             # A failed build leaves the index INVALID and DSQL does not remove
             # it, so the definition must be dropped before it can be retried.
-            $PSQL -c "SELECT job_id, object_name, details FROM sys.jobs
+            run_psql -c "SELECT job_id, object_name, details FROM sys.jobs
                        WHERE job_type='INDEX_BUILD' AND status='failed'"
             exit 1
           fi
@@ -122,7 +130,7 @@ phases:
 
           if [ "$i" = "60" ]; then
             echo "ERROR: index builds still pending after 5 minutes."
-            $PSQL -c "SELECT job_id, status, object_name FROM sys.jobs WHERE job_type='INDEX_BUILD'"
+            run_psql -c "SELECT job_id, status, object_name FROM sys.jobs WHERE job_type='INDEX_BUILD'"
             exit 1
           fi
         done
