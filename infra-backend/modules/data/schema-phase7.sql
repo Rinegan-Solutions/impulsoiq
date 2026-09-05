@@ -97,8 +97,12 @@ CREATE TABLE IF NOT EXISTS ticket (
 CREATE INDEX ASYNC IF NOT EXISTS idx_ticket_tenant ON ticket(tenant_id);
 CREATE INDEX ASYNC IF NOT EXISTS idx_ticket_queue  ON ticket(queue_id);
 CREATE INDEX ASYNC IF NOT EXISTS idx_ticket_rep    ON ticket(tenant_id, assigned_rep_id);
-CREATE INDEX ASYNC IF NOT EXISTS idx_ticket_sla    ON ticket(tenant_id, sla_target_at)
-  WHERE sla_breached_at IS NULL;
+-- Not a partial index: DSQL's CREATE INDEX grammar has no WHERE clause, so the
+-- `WHERE sla_breached_at IS NULL` predicate is dropped and sla_breached_at
+-- becomes an index column instead. The SLA monitor scans un-breached tickets by
+-- target time, and (tenant_id, sla_breached_at, sla_target_at) serves that with
+-- an equality on the null check rather than a filtered index.
+CREATE INDEX ASYNC IF NOT EXISTS idx_ticket_sla ON ticket(tenant_id, sla_breached_at, sla_target_at);
 
 -- ── Rep status ────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS rep_status (

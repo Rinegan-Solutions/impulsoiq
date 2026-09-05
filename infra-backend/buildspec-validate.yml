@@ -24,6 +24,13 @@ phases:
   pre_build:
     commands:
       - echo "Validating environment=${ENV}"
+      # Aurora DSQL's SQL grammar is a strict subset of PostgreSQL's, and psql
+      # only reports a violation when it reaches that line -- mid-migration,
+      # against a live cluster, one error per deploy. This checks the schema
+      # statically so an unsupported construct fails here instead.
+      - |
+        cd "$CODEBUILD_SRC_DIR"
+        python3 scripts/check-dsql-schema.py           infra-backend/modules/data/schema.sql           infra-backend/modules/data/schema-phase7.sql
       - cd "$CODEBUILD_SRC_DIR"
       # One reproducible install for every workspace, including all Lambdas.
       - npm ci --no-audit --no-fund

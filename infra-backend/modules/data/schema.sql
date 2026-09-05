@@ -34,6 +34,13 @@ CREATE TABLE IF NOT EXISTS tenant (
   tier         TEXT        NOT NULL DEFAULT 'starter'
                  CHECK (tier IN ('starter','growth','enterprise')),
   config       JSONB       NOT NULL DEFAULT '{}',
+  -- Phase 6D. Declared HERE, not added later: Aurora DSQL's ALTER TABLE ADD
+  -- COLUMN grammar is `column_name data_type [STORAGE ...]` and nothing else,
+  -- so NOT NULL and DEFAULT can only be set at CREATE TABLE time. The ALTERs
+  -- further down exist solely to patch clusters created before this block.
+  compliance_settings JSONB   NOT NULL DEFAULT '{}',
+  sso_configured      BOOLEAN NOT NULL DEFAULT FALSE,
+  sso_provider_id     TEXT,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -257,13 +264,25 @@ CREATE INDEX ASYNC IF NOT EXISTS idx_registry_status ON agent_registry(status);
 -- ── Phase 6D: Tenant compliance settings ──────────────────────────────────────
 -- Per-tenant jurisdiction flags and SSO configuration.
 -- Stored as a column on the existing tenant table.
--- One ALTER per statement: Aurora DSQL allows a single DDL statement per
--- transaction, and psql runs each statement in its own implicit transaction.
--- Three ADD COLUMN clauses in one ALTER is one statement and would probably be
--- accepted, but splitting removes the question entirely and costs nothing.
-ALTER TABLE tenant ADD COLUMN IF NOT EXISTS compliance_settings JSONB NOT NULL DEFAULT '{}';
-ALTER TABLE tenant ADD COLUMN IF NOT EXISTS sso_configured      BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE tenant ADD COLUMN IF NOT EXISTS sso_provider_id     TEXT;
+-- Backfill for clusters created before those columns moved into CREATE TABLE
+-- above. CREATE TABLE IF NOT EXISTS will not add columns to a table that
+-- already exists, so this path is what upgrades them.
+--
+-- The grammar is unforgiving and is the reason this looks verbose. Aurora DSQL
+-- supports exactly:
+--     ADD [COLUMN] [IF NOT EXISTS] column_name data_type [STORAGE ...]
+-- No NOT NULL, no DEFAULT, no CHECK, no UNIQUE, no REFERENCES. DEFAULT is set
+-- afterwards as its own ALTER COLUMN action.
+--
+-- NOT NULL cannot be applied retrospectively at all: DSQL's ALTER TABLE has
+-- DROP NOT NULL and no SET NOT NULL. On an upgraded cluster these columns stay
+-- nullable, so application code must treat NULL and the default as equivalent
+-- -- which is why crm-read/crm-write coalesce rather than assume.
+ALTER TABLE tenant ADD COLUMN IF NOT EXISTS compliance_settings JSONB;
+ALTER TABLE tenant ALTER COLUMN compliance_settings SET DEFAULT '{}';
+ALTER TABLE tenant ADD COLUMN IF NOT EXISTS sso_configured BOOLEAN;
+ALTER TABLE tenant ALTER COLUMN sso_configured SET DEFAULT FALSE;
+ALTER TABLE tenant ADD COLUMN IF NOT EXISTS sso_provider_id TEXT;
 
 -- ── Phase 6C: A2A handoff log ──────────────────────────────────────────────────
 -- Records cross-department agent handoff events for audit and observability.
