@@ -34,6 +34,7 @@ import os
 import datetime
 import boto3
 from strands import Agent
+from impulsoiq_model import build_model
 from .classifier import batch_classify
 from .tools import (
     fetch_rss_signals,
@@ -45,7 +46,7 @@ from .tools import (
 )
 
 # Stage 2 uses Nova 2 Lite — same model as Research & Enrichment (v3 §5.2)
-STAGE2_MODEL = os.environ.get("SIGNAL_STAGE2_MODEL", "us.amazon.nova-lite-v1:0")
+STAGE2_MODEL = os.environ.get("SIGNAL_STAGE2_MODEL", "global.amazon.nova-2-lite-v1:0")
 REGION       = os.environ.get("AWS_REGION", "eu-west-2")
 
 # ── Default source configurations ────────────────────────────────────────────
@@ -135,7 +136,7 @@ def run(event: dict) -> dict:
     dry_run  = event.get("dryRun", False)
 
     agent = Agent(
-        model         = STAGE2_MODEL,
+        model         = build_model(STAGE2_MODEL),
         system_prompt = SYSTEM_PROMPT + (
             "\n\nDRY RUN MODE: fetch and classify but call promote_to_research_pipeline "
             "with dryRun=True — do not write any records." if dry_run else ""

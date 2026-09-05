@@ -17,6 +17,7 @@ ARM64 container; model: Claude Sonnet (configurable via VOICE_MODEL env var).
 import json
 import os
 from strands import Agent
+from impulsoiq_model import build_model
 from .tools import (
     get_contact_context,
     validate_calling_window,
@@ -83,7 +84,7 @@ When processing a call result (event contains callResult):
   "meetingBooked": bool, "activityId": "<id>", "summary": "<one sentence>" }
 """.strip()
 
-MODEL = os.environ.get("VOICE_MODEL", "us.amazon.nova-lite-v1:0")
+MODEL = os.environ.get("VOICE_MODEL", "global.amazon.nova-2-lite-v1:0")
 
 # ICP call result schema — defines what CALL-E should extract
 QUALIFICATION_RESULT_SCHEMA = {
@@ -115,7 +116,7 @@ def run(event: dict) -> dict:
       { tenantId, contactId, agentRunId, callResult: { ... } }
     """
     agent = Agent(
-        model=MODEL,
+        model=build_model(MODEL),
         system_prompt=SYSTEM_PROMPT,
         tools=[
             get_contact_context,

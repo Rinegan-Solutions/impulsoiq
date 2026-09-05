@@ -26,6 +26,7 @@ Model: Nova 2 Lite, medium thinking — judgment-heavy classification
 import json
 import os
 from strands import Agent
+from impulsoiq_model import build_model
 from .tools import (
     get_conversation_context,
     classify_triage,
@@ -33,7 +34,7 @@ from .tools import (
     stamp_sla_and_create_ticket,
 )
 
-MODEL = os.environ.get("TRIAGE_MODEL", "us.amazon.nova-lite-v1:0")
+MODEL = os.environ.get("TRIAGE_MODEL", "global.amazon.nova-2-lite-v1:0")
 
 SYSTEM_PROMPT = """
 You are the ImpulsoIQ Triage & Escalation Agent for the contact center (Phase 7).
@@ -122,7 +123,7 @@ def run(event: dict) -> dict:
         return {"error": "tenantId and conversationId are required", "status": "failed"}
 
     agent = Agent(
-        model         = MODEL,
+        model         = build_model(MODEL),
         system_prompt = SYSTEM_PROMPT,
         tools         = [
             get_conversation_context,

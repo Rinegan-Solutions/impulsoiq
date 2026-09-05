@@ -28,6 +28,7 @@ import uuid
 import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from strands import Agent
+from impulsoiq_model import build_model
 from .tools import (
     get_closed_won_profiles,
     search_public_signals,
@@ -36,7 +37,7 @@ from .tools import (
     write_research_report,
 )
 
-MODEL = os.environ.get("DEEP_RESEARCH_MODEL", "us.amazon.nova-lite-v1:0")
+MODEL = os.environ.get("DEEP_RESEARCH_MODEL", "global.amazon.nova-2-lite-v1:0")
 
 # Estimated token cost per sub-agent run (for pre-approval cost display)
 TOKENS_PER_SUBAGENT   = 8_000
@@ -111,7 +112,7 @@ def run_sub_agent(
     Called in parallel by the Swarm coordinator via ThreadPoolExecutor.
     """
     agent = Agent(
-        model         = MODEL,
+        model         = build_model(MODEL),
         system_prompt = config["system_prompt"],
         tools         = [
             get_closed_won_profiles,
@@ -181,7 +182,7 @@ def run(event: dict) -> dict:
 
     # ── Synthesis coordinator: read all findings and produce ranked output ────
     synthesis_agent = Agent(
-        model         = MODEL,
+        model         = build_model(MODEL),
         system_prompt = """
 You are the synthesis coordinator for a multi-strategy Swarm research run.
 Read the session memory containing findings from 4 specialist sub-agents, then

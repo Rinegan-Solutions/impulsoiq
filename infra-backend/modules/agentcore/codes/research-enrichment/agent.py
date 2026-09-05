@@ -19,6 +19,7 @@ ARM64 container; model: Nova 2 Lite, medium thinking (v3 §5.2 default).
 import json
 import os
 from strands import Agent
+from impulsoiq_model import build_model
 from .tools import (
     get_internal_history,
     get_brand_voice_profile,
@@ -97,7 +98,7 @@ When done, respond with JSON:
 """.strip()
 
 # v3 §5.2: Nova 2 Lite with medium thinking is the default model for this agent
-MODEL = os.environ.get("ENRICHMENT_MODEL", "us.amazon.nova-lite-v1:0")
+MODEL = os.environ.get("ENRICHMENT_MODEL", "global.amazon.nova-2-lite-v1:0")
 
 
 def run(event: dict) -> dict:
@@ -109,7 +110,7 @@ def run(event: dict) -> dict:
     Returns: {score, verdict, contactId, enrichmentSummary, recommendDisqualify}
     """
     agent = Agent(
-        model=MODEL,
+        model=build_model(MODEL),
         system_prompt=SYSTEM_PROMPT,
         tools=[
             get_internal_history,

@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS message (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX ASYNC IF NOT EXISTS idx_message_conversation ON message(conversation_id);
-CREATE INDEX ASYNC IF NOT EXISTS idx_message_tenant       ON message(tenant_id, created_at DESC);
+CREATE INDEX ASYNC IF NOT EXISTS idx_message_tenant       ON message(tenant_id, created_at);
 
 -- ── Ticket ────────────────────────────────────────────────────────────
 -- tier: 0=auto-resolve  1=draft-review  2=human-required  3=hard-escalate

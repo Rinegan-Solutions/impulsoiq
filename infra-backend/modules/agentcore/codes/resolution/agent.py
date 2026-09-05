@@ -25,6 +25,7 @@ Model: Nova 2 Lite, medium thinking (v4 §5 — consistent with Triage)
 import json
 import os
 from strands import Agent
+from impulsoiq_model import build_model
 from .tools import (
     retrieve_from_kb,
     check_article_freshness,
@@ -36,7 +37,7 @@ from .tools import (
     trigger_csat_prompt,
 )
 
-MODEL = os.environ.get("RESOLUTION_MODEL", "us.amazon.nova-lite-v1:0")
+MODEL = os.environ.get("RESOLUTION_MODEL", "global.amazon.nova-2-lite-v1:0")
 
 SYSTEM_PROMPT = """
 You are the ImpulsoIQ Resolution Agent. You draft or send responses for Tier-0
@@ -137,7 +138,7 @@ def run(event: dict) -> dict:
         }
 
     agent = Agent(
-        model         = MODEL,
+        model         = build_model(MODEL),
         system_prompt = SYSTEM_PROMPT,
         tools         = [
             retrieve_from_kb,

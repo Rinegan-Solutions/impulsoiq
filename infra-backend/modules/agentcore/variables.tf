@@ -84,15 +84,42 @@ variable "metering_table" {
 
 variable "ambient_voice_model" {
   type        = string
-  description = <<-EOT
-    Speech-to-speech model for the Ambient Interface Agent.
+  description = "Speech-to-speech model for the Ambient Interface Agent."
+  default     = "amazon.nova-2-sonic-v1:0"
+}
 
-    Nova Sonic is not offered in eu-west-2 -- `aws bedrock
-    list-foundation-models --region eu-west-2` returns no sonic model — so this
-    must name a cross-region endpoint to enable spoken interaction, and the
-    agent falls back to its text path when it cannot reach one. Left empty by
-    default so the capability is switched on deliberately rather than failing
-    silently in a region that cannot serve it.
+variable "ambient_voice_region" {
+  type        = string
+  description = <<-EOT
+    Region the speech-to-speech model is invoked in.
+
+    Nova Sonic is published in NO EU region -- eu-west-2, eu-west-1 and
+    eu-central-1 all return no sonic model, so this cannot be eu-west-1. It is
+    available in us-east-1 (nova-2-sonic and nova-sonic), us-west-2 and
+    ap-northeast-1.
+
+    This is a data-residency decision, not just a latency one: enabling voice
+    sends EU end-users' audio to the named region, which the GDPR position in
+    PRD §12 has to account for. Only the ambient VOICE path uses it -- every
+    other agent, and this agent's own text path, stay in eu-west-2.
   EOT
-  default     = ""
+  default     = "us-east-1"
+}
+
+variable "reasoning_effort" {
+  type        = string
+  description = <<-EOT
+    Nova 2 extended-thinking level: low | medium | high.
+
+    medium is the roster default in both implementation plans. Note high is not
+    a drop-in swap -- Nova 2 rejects maxTokens, temperature, topP and topK when
+    maxReasoningEffort is high, so raising this needs the inference config
+    reviewed alongside it.
+  EOT
+  default     = "medium"
+
+  validation {
+    condition     = contains(["low", "medium", "high"], var.reasoning_effort)
+    error_message = "reasoning_effort must be low, medium or high."
+  }
 }

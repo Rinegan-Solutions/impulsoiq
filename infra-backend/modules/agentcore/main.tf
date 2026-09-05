@@ -18,11 +18,12 @@ locals {
   # deployment decision, so a region change or a model upgrade is one edit.
   default_model = "global.amazon.nova-2-lite-v1:0"
 
-  # Signal Listening's first-pass classifier is deliberately the cheapest tier
-  # (plan §5.2): high-volume binary relevance filtering, where anything dearer
-  # would dominate the cost of a feature that is cheap precisely because almost
-  # everything is discarded at this stage.
-  classifier_model = "amazon.nova-micro-v1:0"
+  # ONE model across the whole roster, by product decision. Plan v3 §5.2 split
+  # Signal Listening's first-pass filter onto Nova Micro for cost; that split is
+  # dropped. The cost controls that matter for that agent are unchanged and are
+  # enforced in its own code: a hard daily token budget and a 2K-character input
+  # cap per candidate, neither of which depends on the model tier.
+  classifier_model = local.default_model
 
   # Per-agent environment overrides, keyed by the variable each agent reads.
   agent_model_env = {
@@ -44,14 +45,19 @@ locals {
       SIGNAL_CLASSIFIER_MODEL = local.classifier_model
     }
 
-    # Nova Sonic is NOT available in eu-west-2 -- the region publishes no sonic
-    # model at all, so speech-to-speech cannot run in-region. AMBIENT_MODEL is
-    # left to var.ambient_voice_model so the cross-region endpoint can be set
-    # deliberately; the text fallback runs on the in-region default and is what
-    # keeps the agent usable meanwhile.
+    # Nova Sonic is not available in ANY EU region. Verified against the account:
+    #   eu-west-2, eu-west-1, eu-central-1  -> no sonic model
+    #   us-east-1                           -> nova-2-sonic-v1:0, nova-sonic-v1:0
+    #   us-west-2, ap-northeast-1           -> nova-2-sonic-v1:0
+    # So the speech path runs cross-region and the region is named explicitly
+    # rather than inherited, because sending EU customers' voice audio to a US
+    # region is a data-residency decision (PRD §12, GDPR) and not one to make by
+    # accident. The text path stays in-region on Nova 2 Lite, so an unreachable
+    # voice endpoint degrades the agent instead of breaking it.
     ambient-interface = {
-      AMBIENT_MODEL      = var.ambient_voice_model
-      AMBIENT_TEXT_MODEL = local.default_model
+      AMBIENT_MODEL        = var.ambient_voice_model
+      AMBIENT_VOICE_REGION = var.ambient_voice_region
+      AMBIENT_TEXT_MODEL   = local.default_model
     }
   }
 
@@ -270,6 +276,11 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
   environment_variables = merge(
     local.agent_model_env[each.key],
     {
+      # Extended thinking, on for every agent. Both plans make Nova 2 Lite at
+      # MEDIUM reasoning effort the roster default; runtime/impulsoiq_model.py
+      # reads this and sets reasoningConfig on every model call.
+      BEDROCK_REASONING_EFFORT = var.reasoning_effort
+
       ENV                   = var.env
       CRM_WRITE_SERVICE_ARN = var.crm_write_service_arn
       CRM_READ_SERVICE_ARN  = var.crm_read_service_arn

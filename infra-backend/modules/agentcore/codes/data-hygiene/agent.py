@@ -14,6 +14,7 @@ ARM64 container; model: Claude Haiku (lightweight — mostly deterministic work)
 import json
 import os
 from strands import Agent
+from impulsoiq_model import build_model
 from .tools import (
     scan_for_duplicate_contacts,
     compute_similarity_score,
@@ -64,7 +65,7 @@ If they dismiss it, the data stays as-is.
   are not sufficient grounds for a merge proposal
 """.strip()
 
-MODEL = os.environ.get("HYGIENE_MODEL", "us.amazon.nova-lite-v1:0")
+MODEL = os.environ.get("HYGIENE_MODEL", "global.amazon.nova-2-lite-v1:0")
 
 
 def run(event: dict) -> dict:
@@ -77,7 +78,7 @@ def run(event: dict) -> dict:
         return {"status": "error", "reason": "tenantId required"}
 
     agent = Agent(
-        model         = MODEL,
+        model         = build_model(MODEL),
         system_prompt = SYSTEM_PROMPT,
         tools         = [
             scan_for_duplicate_contacts,

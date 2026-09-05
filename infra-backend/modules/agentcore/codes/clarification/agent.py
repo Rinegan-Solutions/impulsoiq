@@ -11,6 +11,7 @@ import json
 import os
 import boto3
 from strands import Agent, tool
+from impulsoiq_model import build_model
 
 _lambda = boto3.client("lambda", region_name=os.environ.get("AWS_REGION", "eu-west-2"))
 
@@ -112,7 +113,7 @@ further questions.
 - Technical settings (webhook URLs, infrastructure configuration)
 """.strip()
 
-MODEL = os.environ.get("CLARIFICATION_MODEL", "us.amazon.nova-lite-v1:0")
+MODEL = os.environ.get("CLARIFICATION_MODEL", "global.amazon.nova-2-lite-v1:0")
 
 
 def run(event: dict) -> dict:
@@ -122,7 +123,7 @@ def run(event: dict) -> dict:
     Returns:        {status: 'clarification_complete', resolvedGoal, parameters}
     """
     agent = Agent(
-        model         = MODEL,
+        model         = build_model(MODEL),
         system_prompt = SYSTEM_PROMPT,
         tools         = [query_settled_preferences, get_contact_summary, emit_specified_goal],
     )

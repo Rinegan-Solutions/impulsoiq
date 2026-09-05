@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS activity (
 CREATE INDEX ASYNC IF NOT EXISTS idx_activity_tenant    ON activity(tenant_id);
 CREATE INDEX ASYNC IF NOT EXISTS idx_activity_contact   ON activity(contact_id);
 CREATE INDEX ASYNC IF NOT EXISTS idx_activity_agent_run ON activity(agent_run_id);
-CREATE INDEX ASYNC IF NOT EXISTS idx_activity_occurred  ON activity(tenant_id, occurred_at DESC);
+CREATE INDEX ASYNC IF NOT EXISTS idx_activity_occurred  ON activity(tenant_id, occurred_at);
 
 -- ── Call Results ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS call_result (

@@ -17,6 +17,7 @@ ARM64 container; invoked by the voice-bridge Lambda via AgentCore Runtime API.
 import json
 import os
 from strands import Agent
+from impulsoiq_model import build_model
 from .tools import (
     submit_goal,
     query_pipeline_status,
@@ -62,8 +63,13 @@ between meetings or while on the go.
 """.strip()
 
 # Nova 2 Sonic is the voice model; fall back to Sonnet for text-only mode
-MODEL = os.environ.get("AMBIENT_MODEL", "us.amazon.nova-sonic-v1:0")
-TEXT_FALLBACK_MODEL = os.environ.get("AMBIENT_TEXT_MODEL", "us.amazon.nova-lite-v1:0")
+# Nova Sonic is not offered in ANY EU region -- eu-west-2 and eu-west-1 both
+# return no sonic model. Speech-to-speech therefore runs cross-region, and
+# AMBIENT_VOICE_REGION says where. The text path stays in-region on Nova 2
+# Lite, so losing the voice endpoint degrades the agent rather than breaking it.
+MODEL = os.environ.get("AMBIENT_MODEL", "amazon.nova-2-sonic-v1:0")
+VOICE_REGION = os.environ.get("AMBIENT_VOICE_REGION", "us-east-1")
+TEXT_FALLBACK_MODEL = os.environ.get("AMBIENT_TEXT_MODEL", "global.amazon.nova-2-lite-v1:0")
 
 
 def run(event: dict) -> dict:
@@ -87,7 +93,13 @@ def run(event: dict) -> dict:
         return {"ok": False, "error": "message is required"}
 
     # Use text fallback model if audio model unavailable
-    model = TEXT_FALLBACK_MODEL if event.get("textMode") else MODEL
+    # Only the text path is a Strands Agent. Sonic is bidirectional
+    # streaming and is driven directly by the voice bridge.
+    model = (
+        build_model(TEXT_FALLBACK_MODEL)
+        if event.get("textMode")
+        else build_model(MODEL, region=VOICE_REGION)
+    )
 
     agent = Agent(
         model         = model,

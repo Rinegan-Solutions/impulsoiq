@@ -17,6 +17,7 @@ import json
 import os
 import datetime
 from strands import Agent
+from impulsoiq_model import build_model
 from .tools import (
     get_pipeline_data,
     get_deal_activity_ages,
@@ -75,7 +76,7 @@ After write_forecast_report, respond with:
 }
 """.strip()
 
-MODEL = os.environ.get("FORECASTING_MODEL", "us.amazon.nova-lite-v1:0")
+MODEL = os.environ.get("FORECASTING_MODEL", "global.amazon.nova-2-lite-v1:0")
 
 
 def run(event: dict) -> dict:
@@ -95,7 +96,7 @@ def run(event: dict) -> dict:
     period = event.get("reportPeriod", now.strftime("%Y-%m"))
 
     agent  = Agent(
-        model         = MODEL,
+        model         = build_model(MODEL),
         system_prompt = SYSTEM_PROMPT,
         tools         = [
             get_pipeline_data,

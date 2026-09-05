@@ -14,6 +14,7 @@ ARM64 container; model: Claude Sonnet (configurable via OUTREACH_MODEL env var).
 import json
 import os
 from strands import Agent
+from impulsoiq_model import build_model
 from .tools import (
     get_previous_touches,
     get_enrichment_context,
@@ -98,7 +99,7 @@ When done, respond with JSON:
 }
 """.strip()
 
-MODEL = os.environ.get("OUTREACH_MODEL", "us.amazon.nova-lite-v1:0")
+MODEL = os.environ.get("OUTREACH_MODEL", "global.amazon.nova-2-lite-v1:0")
 
 
 def run(event: dict) -> dict:
@@ -112,7 +113,7 @@ def run(event: dict) -> dict:
        approvalMode?, hasConsent, configurationSet?}
     """
     agent = Agent(
-        model=MODEL,
+        model=build_model(MODEL),
         system_prompt=SYSTEM_PROMPT,
         tools=[
             get_previous_touches,

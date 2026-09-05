@@ -5,7 +5,7 @@ This is the cheap, high-volume gate that filters raw public signals before
 they reach the expensive Research & Enrichment pipeline. Almost everything
 gets filtered out here — that's the point.
 
-Model: amazon.nova-micro-v1:0 (cheapest tier, no reasoning, binary output)
+Model: Nova 2 Lite with extended thinking, like every other agent.
 Volume: hundreds of raw signals → single-digit promoted candidates
 Cost:   ~$0.0001 per classification (Nova Micro pricing)
 
@@ -21,11 +21,12 @@ import boto3
 
 REGION = os.environ.get("AWS_REGION", "eu-west-2")
 
-# Nova Micro — cheapest tier, purpose-built for simple classification
-# Overridable so the deployment picks the model, like every other agent.
-# The us.* default was a US-only inference profile and does not resolve in
-# eu-west-2; Terraform sets SIGNAL_CLASSIFIER_MODEL to the in-region id.
-CLASSIFIER_MODEL = os.environ.get("SIGNAL_CLASSIFIER_MODEL", "amazon.nova-micro-v1:0")
+# Nova 2 Lite, like every other agent. Plan v3 §5.2 specified Nova Micro for
+# this first-pass filter on cost grounds; the product decision is a single model
+# across the roster, so the two-tier split no longer applies. The cost control
+# that actually matters here is unchanged and is enforced below: the daily token
+# budget and the 2K-character input cap, not the model tier.
+CLASSIFIER_MODEL = os.environ.get("SIGNAL_CLASSIFIER_MODEL", "global.amazon.nova-2-lite-v1:0")
 
 # Daily token budget per tenant (hard-coded, not agent-discretionary per v3 spec)
 DAILY_STAGE1_TOKEN_BUDGET = int(os.environ.get("SIGNAL_DAILY_STAGE1_TOKENS", "500000"))
@@ -77,18 +78,30 @@ def classify_signal(signal_text: str, bedrock_client=None) -> dict:
     prompt = CLASSIFIER_PROMPT.format(signal_text=signal_text[:2000])  # cap at 2K chars
 
     try:
-        response = bedrock_client.invoke_model(
-            modelId    = CLASSIFIER_MODEL,
-            body       = json.dumps({
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 200,
-                "temperature": 0.0,  # deterministic for classification
-            }),
-            contentType = "application/json",
-            accept      = "application/json",
+        # converse(), not invoke_model(). The previous body was Anthropic's
+        # wire format -- {"messages":[{"content": "<str>"}], "max_tokens"} read
+        # back as body["content"][0]["text"] -- which Nova does not accept or
+        # return. converse() is model-agnostic, so the classifier keeps working
+        # if the model changes again, and it is how extended thinking is set.
+        response = bedrock_client.converse(
+            modelId  = CLASSIFIER_MODEL,
+            messages = [{"role": "user", "content": [{"text": prompt}]}],
+            inferenceConfig = {"maxTokens": 512, "temperature": 0.0},
+            additionalModelRequestFields = {
+                "reasoningConfig": {
+                    "type": "enabled",
+                    "maxReasoningEffort": os.environ.get("BEDROCK_REASONING_EFFORT", "medium"),
+                }
+            },
         )
-        body   = json.loads(response["body"].read())
-        text   = body.get("content", [{}])[0].get("text", "{}").strip()
+
+        # Reasoning models emit reasoningContent blocks alongside text; take the
+        # text ones only, or the JSON parse below sees the model thinking aloud.
+        text = "".join(
+            block["text"]
+            for block in response["output"]["message"]["content"]
+            if "text" in block
+        ).strip()
 
         # Extract JSON from the response
         if text.startswith("{"):

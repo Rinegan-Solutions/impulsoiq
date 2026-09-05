@@ -11,6 +11,7 @@ Specialist agents (research, outreach, voice, nurture) are invoked starting Phas
 import json
 import os
 from strands import Agent
+from impulsoiq_model import build_model
 from .tools import (
     check_consent,
     write_crm_record,
@@ -69,7 +70,7 @@ Always use Graph topology (deterministic, step-by-step). Never use Swarm in Phas
 Always respond with a JSON object: {success, message, agentRunIds[], blockedSteps[]}
 """.strip()
 
-MODEL = os.environ.get("COORDINATOR_MODEL", "us.amazon.nova-lite-v1:0")
+MODEL = os.environ.get("COORDINATOR_MODEL", "global.amazon.nova-2-lite-v1:0")
 
 
 def run(event: dict) -> dict:
@@ -83,7 +84,7 @@ def run(event: dict) -> dict:
       {tenantId, campaignId, contactId, goal?, contactIds?}
     """
     agent = Agent(
-        model       = MODEL,
+        model       = build_model(MODEL),
         system_prompt = SYSTEM_PROMPT,
         tools       = [
             check_consent,

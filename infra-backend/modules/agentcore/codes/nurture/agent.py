@@ -14,6 +14,7 @@ import json
 import os
 import datetime
 from strands import Agent
+from impulsoiq_model import build_model
 from .tools import (
     get_contact_engagement,
     get_contact_cadence_memory,
@@ -75,7 +76,7 @@ outreach — keeping them warm without over-contacting.
 }
 """.strip()
 
-MODEL = os.environ.get("NURTURE_MODEL", "us.amazon.nova-lite-v1:0")
+MODEL = os.environ.get("NURTURE_MODEL", "global.amazon.nova-2-lite-v1:0")
 
 
 def run(event: dict) -> dict:
@@ -90,7 +91,7 @@ def run(event: dict) -> dict:
         engagementSignals?: { email_opened, email_replied, link_clicked } }
     """
     agent = Agent(
-        model=MODEL,
+        model=build_model(MODEL),
         system_prompt=SYSTEM_PROMPT,
         tools=[
             get_contact_engagement,

@@ -27,6 +27,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # The agent package, imported by server.py as "<AGENT_NAME>.agent"
 COPY codes/${AGENT_NAME}/ ./${AGENT_NAME}/
 COPY runtime/server.py ./server.py
+# Shared model construction (Nova 2 Lite + extended thinking). Copied into every
+# agent image so the reasoning configuration lives in one file, not fourteen.
+COPY runtime/impulsoiq_model.py ./impulsoiq_model.py
 
 # Namespace packages work without __init__.py on Python 3.3+, but an explicit
 # one keeps relative imports (`from .tools import ...`) unambiguous.
