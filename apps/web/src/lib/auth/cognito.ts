@@ -188,6 +188,7 @@ export function signIn(email: string, password: string): Promise<SignInResult> {
  */
 export function signUp(
   email: string, password: string, tenantId: string, name: string, workspaceName?: string,
+  clientMetadata?: Record<string, string>,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const attrs = [new CognitoUserAttribute({ Name: 'custom:tenant_id', Value: tenantId })];
@@ -195,7 +196,10 @@ export function signUp(
     if (workspaceName) {
       attrs.push(new CognitoUserAttribute({ Name: 'custom:workspace_name', Value: workspaceName.slice(0, 80) }));
     }
-    getPool().signUp(email, password, attrs, [], (err) => (err ? reject(err) : resolve()));
+    // clientMetadata reaches the PreSignUp trigger and is NOT stored on the
+    // account — which is why the invitation token travels here rather than as a
+    // custom attribute that would remain readable afterwards.
+    getPool().signUp(email, password, attrs, [], (err) => (err ? reject(err) : resolve()), clientMetadata);
   });
 }
 

@@ -15,12 +15,13 @@
 # the same data.
 #
 # AUTH
-# COGNITO_USER_POOLS on everything a signed-in user calls. Three endpoints are
+# COGNITO_USER_POOLS on everything a signed-in user calls. Five endpoints are
 # deliberately public because the caller cannot have a token:
 #   org-check        -- called during sign-up, before an account exists
 #   webhooks/calle   -- called by CALL-E, an external service
 #   webhooks-stripe  -- called by Stripe; verified by signature, not Cognito
 #   csat             -- called from a survey link in an email
+#   invite-lookup    -- opened from an invitation email, before an account exists
 #
 # CORS
 # Access-Control-Allow-Origin is "*" with credentials OFF. The API is
@@ -90,6 +91,20 @@ locals {
     }
     "webhooks-stripe" = {
       lambda     = "billing-service"
+      method     = "POST"
+      authorized = false
+    }
+    "invitations" = {
+      lambda     = "invitation-service"
+      method     = "POST"
+      authorized = true
+    }
+    # Resolving an invite token happens on the sign-up screen, before the
+    # invitee has an account -- there is no token they could present. The raw
+    # invitation token IS the credential, and the handler answers every failure
+    # identically so this cannot be used to probe for valid ones.
+    "invite-lookup" = {
+      lambda     = "invitation-service"
       method     = "POST"
       authorized = false
     }

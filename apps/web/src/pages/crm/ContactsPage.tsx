@@ -6,7 +6,9 @@ import { accountsApi, contactsApi } from '@/api/client';
 import type { Account, Contact } from '@/api/schemas';
 import { AppShell } from '@/components/app/AppShell';
 import { SEO } from '@/components/SEO';
-import { RecordForm, Field, fieldClass } from '@/components/app/RecordForm';
+import { RecordForm, Field, fieldClass, RecordSelect } from '@/components/app/RecordForm';
+import { CsvImportBar } from '@/components/app/CsvImportBar';
+import { CONTACT_SAMPLE, importContacts } from '@/lib/crmBulk';
 import { cn } from '@/lib/utils';
 
 const STAGE_CLS: Record<string, string> = {
@@ -46,6 +48,7 @@ export default function ContactsPage() {
   const [selected, setSelected]   = useState<Set<string>>(new Set());
   const [creating, setCreating]   = useState(false);
   const [accounts, setAccounts]   = useState<Account[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(false);
   const [form, setForm]           = useState({ firstName: '', lastName: '', email: '', title: '', accountId: '' });
   const [saving, setSaving]       = useState(false);
 
@@ -101,21 +104,36 @@ export default function ContactsPage() {
       <div className="px-4 sm:px-6 py-6">
 
         {/* Header */}
-        <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center justify-between mb-6 gap-3 flex-wrap">
           <div>
             <h1 className="text-[1.25rem] font-extrabold tracking-tight text-slate-900 dark:text-white">Contacts</h1>
             <p className="text-[0.82rem] text-slate-500 dark:text-slate-400 mt-0.5">{total.toLocaleString()} total contacts</p>
           </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <CsvImportBar
+              sampleName="contacts-sample.csv"
+              sampleCsv={CONTACT_SAMPLE}
+              onRows={async (rows) => {
+                const out = await importContacts(rows);
+                await load();
+                return out;
+              }}
+            />
           <button
             type="button"
             onClick={() => {
               setCreating(true);
-              void accountsApi.list(1, 50).then((r) => setAccounts(r.items)).catch(() => setAccounts([]));
+              setAccountsLoading(true);
+              void accountsApi.list(1, 100)
+                .then((r) => setAccounts(r.items))
+                .catch(() => setAccounts([]))
+                .finally(() => setAccountsLoading(false));
             }}
             className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:shadow-lg hover:shadow-indigo-500/25 hover:-translate-y-0.5 transition-all"
           >
             <Plus size={15} /> Add contact
           </button>
+          </div>
         </div>
 
         {/* Toolbar */}
@@ -242,11 +260,16 @@ export default function ContactsPage() {
           <Field label="Last name"><input required className={fieldClass} value={form.lastName} onChange={(e) => setForm({ ...form, lastName: e.target.value })} /></Field>
           <Field label="Email"><input type="email" className={fieldClass} value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
           <Field label="Title"><input className={fieldClass} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></Field>
-          <Field label="Company">
-            <select className={fieldClass} value={form.accountId} onChange={(e) => setForm({ ...form, accountId: e.target.value })}>
-              <option value="">None</option>
-              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
+          <Field label="Company" asLabel={false}>
+            <RecordSelect
+              value={form.accountId}
+              onChange={(accountId) => setForm({ ...form, accountId })}
+              options={accounts.map((a) => ({ value: a.id, label: a.name }))}
+              loading={accountsLoading}
+              emptyLabel="None"
+              searchPlaceholder="Search companies…"
+              emptyHint="No companies yet. Add one on Companies first."
+            />
           </Field>
         </RecordForm>
       )}

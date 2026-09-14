@@ -27,12 +27,14 @@ import {
   KnowledgeArticleSchema,
   TemplateActivationSchema,
   OrgCheckSchema,
+  InvitationSchema,
   SequenceSchema,
   EnrichmentRecordSchema,
   PaginatedSchema,
   type Contact,
   type Deal,
   type Campaign,
+  type InvitationRole,
 } from './schemas';
 
 const OkSchema = z.object({ ok: z.boolean().optional(), id: z.string().optional() }).passthrough();
@@ -85,6 +87,9 @@ export const activitiesApi = {
 
   pendingApprovals: () =>
     operation('/crm-read', 'list_pending_approvals', {}, z.array(ActivitySchema)),
+
+  create: (body: { contactId?: string; accountId?: string; type: string; actorType: string; actorId: string; subject?: string; body?: string; occurredAt?: string }) =>
+    operation('/crm-write', 'upsert_activity', body, OkSchema),
 };
 
 // ─── Campaigns ────────────────────────────────────────────────────────────────
@@ -490,6 +495,73 @@ export const intentApi = {
       method: 'POST',
       body: JSON.stringify({ operation: 'record_event', eventType, data }),
     }),
+};
+
+// ─── Invitations ──────────────────────────────────────────────────────────────
+//
+// Membership is granted only by invitation — joining by matching email domain
+// was removed because controlling a mailbox at a customer's domain is not the
+// same as being authorised to see their CRM.
+//
+// Every rule below is enforced by the API, not here: a member gets a 403 from
+// /invitations whatever the UI renders. `canInvite` exists to avoid showing a
+// control that would only fail, never as the check itself.
+
+export const invitationsApi = {
+  /** Pending, accepted and revoked invitations for this workspace. Admin/manager only. */
+  list: () => operation('/crm-read', 'list_invitations', {}, z.array(InvitationSchema)),
+
+  /**
+   * Mint an invitation and email it.
+   *
+   * 201 with emailed:true is fully sent. 202 with emailed:false means the row
+   * exists but SES refused — the caller must say so rather than imply delivery.
+   */
+  create: (body: { email: string; role: InvitationRole; workspaceName?: string }) =>
+    request('/invitations', z.object({
+      ok: z.boolean().optional(),
+      id: z.string().optional(),
+      email: z.string().optional(),
+      role: z.string().optional(),
+      expiresAt: z.string().optional(),
+      emailed: z.boolean().optional(),
+      error: z.string().optional(),
+    }).passthrough(), {
+      method: 'POST',
+      body: JSON.stringify({ operation: 'create', ...body }),
+    }),
+
+  revoke: (id: string) =>
+    request('/invitations', z.object({ ok: z.boolean().optional() }).passthrough(), {
+      method: 'POST',
+      body: JSON.stringify({ operation: 'revoke', id }),
+    }),
+
+  /**
+   * Public: what an invite link is for. Called on the sign-up screen before any
+   * account exists. Every failure answers identically — an invalid token and an
+   * expired one are indistinguishable, so this cannot be used to probe.
+   */
+  resolve: (token: string) =>
+    request('/invite-lookup', z.object({
+      valid: z.boolean(),
+      email: z.string().optional(),
+      role: z.string().optional(),
+      tenantId: z.string().optional(),
+      workspaceName: z.string().optional(),
+      expiresAt: z.string().optional(),
+      error: z.string().optional(),
+    }), {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    }),
+};
+
+/** Roles a given role may invite. Mirrors INVITABLE in invitation-service. */
+export const INVITABLE_ROLES: Record<string, InvitationRole[]> = {
+  admin: ['admin', 'manager', 'member'],
+  manager: ['member'],
+  member: [],
 };
 
 // ─── Org check (public — called before the user has an account) ───────────────

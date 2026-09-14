@@ -78,3 +78,14 @@ variable "stripe_price_pack_concurrent_runs" {
   type    = string
   default = ""
 }
+
+variable "web_host" {
+  type        = string
+  description = "Host the web app is served from for this environment. Workspaces live at <slug>.<web_host>, so invitation links are built from it."
+}
+
+variable "ses_from_address" {
+  type        = string
+  description = "From address for transactional mail (invitations). Must be on a verified SES identity."
+  default     = "noreply@impulsoiq.rinegansolutions.com"
+}

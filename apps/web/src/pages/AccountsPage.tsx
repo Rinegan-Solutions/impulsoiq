@@ -5,7 +5,10 @@ import { accountsApi } from '@/api/client';
 import type { Account } from '@/api/schemas';
 import { AppShell } from '@/components/app/AppShell';
 import { SEO } from '@/components/SEO';
-import { RecordForm, Field, fieldClass } from '@/components/app/RecordForm';
+import { RecordForm, Field, fieldClass, SuggestInput } from '@/components/app/RecordForm';
+import { CsvImportBar } from '@/components/app/CsvImportBar';
+import { COMPANY_SAMPLE, importCompanies } from '@/lib/crmBulk';
+import { COMPANY_INDUSTRIES, POPULAR_COMPANY_DOMAINS } from '@/lib/companyOptions';
 import { cn } from '@/lib/utils';
 
 function timeAgo(iso?: string) {
@@ -66,14 +69,25 @@ export default function AccountsPage() {
     <AppShell>
       <SEO title="Companies — ImpulsoIQ" description="Company account records" />
       <div className="px-4 sm:px-6 py-6">
-        <div className="flex items-center justify-between mb-5">
+        <div className="flex items-center justify-between mb-5 gap-3 flex-wrap">
           <div>
             <h1 className="text-[1.25rem] font-extrabold tracking-tight text-slate-900 dark:text-white">Companies</h1>
             <p className="text-[0.82rem] text-slate-500 dark:text-slate-400 mt-0.5">{total} accounts in this workspace</p>
           </div>
-          <button type="button" onClick={() => setCreating(true)} className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600">
-            <Plus size={15} /> Add company
-          </button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <CsvImportBar
+              sampleName="companies-sample.csv"
+              sampleCsv={COMPANY_SAMPLE}
+              onRows={async (rows) => {
+                const out = await importCompanies(rows);
+                await load();
+                return out;
+              }}
+            />
+            <button type="button" onClick={() => setCreating(true)} className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600">
+              <Plus size={15} /> Add company
+            </button>
+          </div>
         </div>
 
         <div className="relative max-w-sm mb-5">
@@ -130,8 +144,24 @@ export default function AccountsPage() {
       {creating && (
         <RecordForm title="New company" onClose={() => setCreating(false)} onSubmit={(e) => void createAccount(e)} busy={saving}>
           <Field label="Name"><input required className={fieldClass} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-          <Field label="Domain"><input className={fieldClass} value={form.domain} onChange={(e) => setForm({ ...form, domain: e.target.value })} /></Field>
-          <Field label="Industry"><input className={fieldClass} value={form.industry} onChange={(e) => setForm({ ...form, industry: e.target.value })} /></Field>
+          <Field label="Domain">
+            <SuggestInput
+              listId="company-domain-suggest"
+              value={form.domain}
+              onChange={(domain) => setForm({ ...form, domain })}
+              placeholder="example.com"
+              options={[...POPULAR_COMPANY_DOMAINS, ...accounts.map((a) => a.domain).filter((d): d is string => Boolean(d))]}
+            />
+          </Field>
+          <Field label="Industry">
+            <SuggestInput
+              listId="company-industry-suggest"
+              value={form.industry}
+              onChange={(industry) => setForm({ ...form, industry })}
+              placeholder="Software / SaaS"
+              options={COMPANY_INDUSTRIES}
+            />
+          </Field>
         </RecordForm>
       )}
     </AppShell>

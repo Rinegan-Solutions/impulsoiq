@@ -138,9 +138,15 @@ resource "aws_iam_role_policy" "tenant_provisioner" {
         # AdminDisableUser: an account that confirmed into a workspace it may not
         # join (someone else created it after sign-up) is disabled rather than
         # left holding that workspace's claim.
-        Sid      = "CognitoMembership"
-        Effect   = "Allow"
-        Action   = ["cognito-idp:AdminAddUserToGroup", "cognito-idp:AdminDisableUser"]
+        Sid    = "CognitoMembership"
+        Effect = "Allow"
+        # AdminListGroupsForUser: an account that already holds a role needs no
+        # invitation and must not be disabled -- see hasWorkspaceGroup().
+        Action = [
+          "cognito-idp:AdminAddUserToGroup",
+          "cognito-idp:AdminDisableUser",
+          "cognito-idp:AdminListGroupsForUser",
+        ]
         Resource = aws_cognito_user_pool.main.arn
       }
     ]

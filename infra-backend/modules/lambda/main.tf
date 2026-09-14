@@ -36,6 +36,10 @@ locals {
     sla-monitor    = { handler = "handler.handler", timeout = 120, memory = 256 }
     # Phase 8
     csat-capture = { handler = "handler.handler", timeout = 15, memory = 128 }
+    # Workspace membership: mints and revokes invitations, and resolves an
+    # invite token for the sign-up screen. The only route into an existing
+    # workspace -- see codes/invitation-service/handler.ts.
+    invitation-service = { handler = "handler.handler", timeout = 15, memory = 256 }
     # Shim: AgentCore runtimes are not Lambdas and cannot be targeted by
     # EventBridge Scheduler or invoked with lambda:InvokeFunction. Anything that
     # needs to run an agent calls this and passes the agent ARN in the payload.
@@ -141,14 +145,17 @@ resource "aws_iam_role_policy" "lambda" {
         ]
       },
       {
-        # agent-invoker calls the AgentCore DATA plane. This is a different
-        # service from bedrock: InvokeAgentRuntime, not InvokeModel.
+        # AgentCore runtime IDs are {name}-{suffix}, e.g.
+        # impulsoiq_deep_research_prod-ZhFHe980Zl. A resource ARN that ends at
+        # _${env} does not match that suffix, so InvokeAgentRuntime is denied.
         Sid    = "InvokeAgentRuntimes"
         Effect = "Allow"
         Action = ["bedrock-agentcore:InvokeAgentRuntime"]
         Resource = [
           "arn:aws:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:runtime/${var.project}_*_${var.env}",
           "arn:aws:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:runtime/${var.project}_*_${var.env}/*",
+          "arn:aws:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:runtime/${var.project}_*_${var.env}-*",
+          "arn:aws:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:runtime/${var.project}_*_${var.env}-*/*",
         ]
       },
       {
@@ -206,6 +213,20 @@ resource "aws_iam_role_policy" "lambda" {
         Effect   = "Allow"
         Action   = "execute-api:ManageConnections"
         Resource = "arn:aws:execute-api:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:*/${var.env}/*"
+      },
+      {
+        # @aws-sdk/client-sesv2 — SendEmailCommand from invitation-service.
+        # Scoped to the verified parent identity that every ImpulsoIQ address
+        # sends under (see modules/api/ses.tf for why the subdomain is not a
+        # separate identity), and further narrowed to the From address this
+        # environment actually uses.
+        Sid      = "SesSendInvitations"
+        Effect   = "Allow"
+        Action   = ["ses:SendEmail", "ses:SendRawEmail"]
+        Resource = "arn:aws:ses:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:identity/rinegansolutions.com"
+        Condition = {
+          StringEquals = { "ses:FromAddress" = var.ses_from_address }
+        }
       },
       {
         # @aws-sdk/client-cognito-identity-provider — AdminAddUserToGroupCommand.
@@ -294,6 +315,13 @@ resource "aws_lambda_function" "fn" {
       } : {},
       each.key == "execution-controller" ? {
         CALLE_BASE_URL = var.calle_base_url
+      } : {},
+      each.key == "invitation-service" ? {
+        # Invite links point at <slug>.<web_host>, matching infra-web's
+        # per-environment tenant wildcard certificate.
+        WEB_HOST              = var.web_host
+        SES_FROM_ADDRESS      = var.ses_from_address
+        SES_CONFIGURATION_SET = "impulsoiq-${var.env}"
       } : {},
       each.key == "csat-capture" ? {
         CONNECT_INTAKE_ARN = "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${var.project}-connect-intake-${var.env}"

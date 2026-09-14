@@ -8,7 +8,13 @@ import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 
 const sfn  = new SFNClient({});
 const ssm  = new SSMClient({});
-const ddb  = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb  = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
+  // DynamoDB rejects an undefined attribute value outright. Optional fields
+  // (starter, campaignId, agentRunId, ...) are routinely undefined, so without
+  // this every Put/Update carrying one fails at runtime with
+  // "Pass options.removeUndefinedValues=true".
+  marshallOptions: { removeUndefinedValues: true },
+});
 const lambda = new LambdaClient({});
 const TABLE = process.env.DYNAMODB_TABLE!;
 const CRM_READ = process.env.CRM_READ_SERVICE_ARN!;

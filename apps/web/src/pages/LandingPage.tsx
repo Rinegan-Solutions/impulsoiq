@@ -11,6 +11,7 @@ import { cn } from '@/lib/utils';
 import { NavBar } from '@/components/layout/NavBar';
 import { Footer } from '@/components/layout/Footer';
 import { SEO } from '@/components/SEO';
+import { useMarketingCta } from '@/lib/marketingCta';
 
 // ─── Types & constants ──────────────────────────────────────────────────────
 
@@ -299,6 +300,7 @@ function ActivityTerminal() {
 // ─── Hero ────────────────────────────────────────────────────────────────────
 
 function Hero() {
+  const { to, inApp } = useMarketingCta();
   return (
     <section id="hero" className="relative min-h-[85svh] flex items-center overflow-hidden">
       {/* Background */}
@@ -341,11 +343,11 @@ function Hero() {
             transition={{ duration: 0.6, delay: 0.26, ease }}
           >
             <Link
-              to="/sign-up"
+              to={to}
               className="relative inline-flex items-center gap-2 px-6 py-3.5 font-semibold text-white rounded-xl overflow-hidden bg-gradient-to-r from-indigo-600 to-violet-600 shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:shadow-indigo-500/35 hover:-translate-y-0.5 transition-all duration-200"
             >
               <span className="absolute inset-0 bg-gradient-to-r from-transparent via-white/12 to-transparent -translate-x-full animate-shimmer" aria-hidden="true" />
-          Open your workspace
+              {inApp ? 'Open workspace' : 'Open your workspace'}
               <ArrowRight size={16} />
             </Link>
             <a
@@ -603,6 +605,7 @@ const PW_ROWS = [
 ];
 
 function ControlPanelPreview() {
+  const { to, inApp } = useMarketingCta();
   return (
     <section id="panel" className="py-20 px-4 sm:px-6 bg-slate-50 dark:bg-[#080e1d]">
       <div className="max-w-[1280px] mx-auto grid grid-cols-1 lg:grid-cols-2 gap-10 lg:gap-16 items-center">
@@ -639,7 +642,9 @@ function ControlPanelPreview() {
             ))}
             <div className="flex items-center justify-between px-5 py-3 bg-slate-50 dark:bg-white/[0.015] border-t border-slate-200 dark:border-white/[0.04] text-[0.72rem] text-slate-500">
               <span>Illustrative preview</span>
-              <Link to="/sign-up" className="text-indigo-600 dark:text-indigo-400 font-semibold hover:opacity-75 transition-opacity">Try it on your pipeline →</Link>
+              <Link to={inApp ? '/control-panel' : to} className="text-indigo-600 dark:text-indigo-400 font-semibold hover:opacity-75 transition-opacity">
+                {inApp ? 'Open Control Panel →' : 'Try it on your pipeline →'}
+              </Link>
             </div>
           </div>
         </FadeUp>
@@ -680,6 +685,7 @@ function ControlPanelPreview() {
 // ─── CTA Section ─────────────────────────────────────────────────────────────
 
 function CTASection() {
+  const { to, startLabel } = useMarketingCta();
   return (
     <section id="cta" className="py-24 px-4 sm:px-6 bg-gradient-to-br from-indigo-600 via-violet-600 to-indigo-700 relative overflow-hidden">
       <div className="absolute inset-0 opacity-20" style={{
@@ -696,10 +702,10 @@ function CTASection() {
         </p>
         <div className="flex justify-center flex-wrap gap-3">
           <Link
-            to="/sign-up"
+            to={to}
             className="inline-flex items-center gap-2 px-6 py-3.5 font-semibold text-indigo-700 bg-white rounded-xl shadow-lg hover:shadow-xl hover:-translate-y-0.5 transition-all"
           >
-            Start free — no credit card
+            {startLabel}
             <ArrowRight size={16} />
           </Link>
           <a

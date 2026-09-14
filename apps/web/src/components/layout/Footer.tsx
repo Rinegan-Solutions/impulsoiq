@@ -1,15 +1,18 @@
 import { Link } from 'react-router-dom';
+import { useMarketingCta } from '@/lib/marketingCta';
+
 export function Footer() {
+  const { to, inApp } = useMarketingCta();
   return (
     <footer className="border-t border-slate-200 dark:border-white/[0.065] bg-slate-50 dark:bg-[#080e1d] px-4 sm:px-6 py-8">
       <div className="flex flex-wrap items-center justify-between gap-5">
         <div>
-          <div className="flex items-center gap-2.5 tracking-tight mb-1">
+          <Link to="/" className="flex items-center gap-2.5 tracking-tight mb-1">
             <img src="/android-chrome-192x192.png" alt="" aria-hidden="true" className="w-6 h-6 rounded-md object-cover" />
             <span className="font-extrabold text-[1rem] bg-gradient-to-r from-indigo-600 via-violet-600 to-indigo-500 bg-clip-text text-transparent">
               ImpulsoIQ
             </span>
-          </div>
+          </Link>
           <div className="text-[0.74rem] text-slate-400 dark:text-slate-600">AI agents for your revenue team</div>
         </div>
         <nav className="flex flex-wrap gap-6" aria-label="Footer navigation">
@@ -17,7 +20,7 @@ export function Footer() {
             ['/#features', 'Features'],
             ['/#how', 'How it works'],
             ['/pricing', 'Pricing'],
-            ['/sign-up', 'Get access'],
+            [to, inApp ? 'Open workspace' : 'Get access'],
             ['/privacy', 'Privacy'],
             ['/terms', 'Terms'],
           ].map(([href, label]) => {

@@ -48,6 +48,8 @@ interface InvokeRequest {
   payload?: Record<string, unknown>;
   qualifier?: string;
   runtimeSessionId?: string;
+  /** Step Functions Catch needs a thrown error; Scheduler prefers a returned failure. */
+  throwOnError?: boolean;
 }
 
 /** Collect the agent's streamed response body into a string. */
@@ -72,10 +74,11 @@ async function readBody(body: unknown): Promise<string> {
 }
 
 export const handler = async (event: InvokeRequest) => {
+  const throwOnError = THROW_ON_ERROR || event?.throwOnError === true;
   const agentRuntimeArn = event?.agentRuntimeArn;
   if (!agentRuntimeArn) {
     const error = 'agentRuntimeArn is required';
-    if (THROW_ON_ERROR) throw new Error(error);
+    if (throwOnError) throw new Error(error);
     return { ok: false, agentRuntimeArn: null, error };
   }
 
@@ -111,7 +114,7 @@ export const handler = async (event: InvokeRequest) => {
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     console.error('InvokeAgentRuntime failed', { agentRuntimeArn, sessionId, error });
-    if (THROW_ON_ERROR) throw err;
+    if (throwOnError) throw err;
     return { ok: false, agentRuntimeArn, sessionId, error };
   }
 };

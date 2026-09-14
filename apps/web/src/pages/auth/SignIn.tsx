@@ -7,6 +7,8 @@ import {
 } from '@/lib/auth/cognito';
 import { useAuth } from '@/lib/auth/useAuth';
 import { currentTenantSlug, workspaceHost } from '@/lib/tenant';
+import { orgCheckApi } from '@/api/client';
+import WorkspaceExistsModal, { type ExistingWorkspace } from '@/components/auth/WorkspaceExistsModal';
 import {
   SplitLayout, BrandPanel, AuthHeading,
   FormField, PasswordField, ErrorBanner, NoticeBanner, PrimaryBtn,
@@ -26,6 +28,8 @@ const PANEL = (
 
 type Step = 'credentials' | 'new-password';
 
+const ZONE = import.meta.env.VITE_WEB_ZONE ?? 'impulsoiq.rinegansolutions.com';
+
 export default function SignIn() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
@@ -39,6 +43,11 @@ export default function SignIn() {
   const [error, setError]             = useState('');
   const [loading, setLoading]         = useState(false);
   const completeChallenge = useRef<((newPassword: string) => Promise<void>) | null>(null);
+
+  // Shown when someone with no account signs in at an address whose domain
+  // already has a workspace — see handleCredentials.
+  const [existing, setExisting] = useState<ExistingWorkspace[]>([]);
+  const [modalOpen, setModalOpen] = useState(false);
 
   const notice =
     params.get('verified') ? 'Email verified. Sign in to open your workspace.' :
@@ -100,6 +109,27 @@ export default function SignIn() {
       if (code === 'PasswordResetRequiredException') {
         navigate(`/forgot-password?email=${encodeURIComponent(address)}&required=1`);
         return;
+      }
+      // No account for this address. If their company already has a workspace,
+      // the useful answer is not "wrong password" — it is that membership comes
+      // from an admin's invitation. Cognito deliberately returns the same code
+      // for an unknown user and a wrong password, so this is advisory only and
+      // reveals nothing about whether the account exists: the modal's content
+      // comes from org-check, which is public and keyed on the domain alone.
+      if (code === 'UserNotFoundException' || code === 'NotAuthorizedException') {
+        const domain = address.split('@')[1];
+        if (domain) {
+          try {
+            const res = await orgCheckApi.byDomain(domain);
+            const tenants = res.tenants.map(t => ({ name: t.name, subdomain: t.subdomain ?? '' }));
+            if (tenants.length > 0) {
+              setExisting(tenants);
+              setModalOpen(true);
+            }
+          } catch {
+            /* advisory only — fall through to the normal error */
+          }
+        }
       }
       setError(authErrorMessage(err, 'Sign-in failed. Please try again.'));
       setLoading(false);
@@ -168,6 +198,13 @@ export default function SignIn() {
 
   return (
     <SplitLayout panel={PANEL}>
+      <WorkspaceExistsModal
+        open={modalOpen}
+        workspaces={existing}
+        domain={email.split('@')[1] ?? ''}
+        zone={ZONE}
+        onClose={() => setModalOpen(false)}
+      />
       <AuthHeading
         title="Welcome back"
         sub="Sign in to your ImpulsoIQ workspace"

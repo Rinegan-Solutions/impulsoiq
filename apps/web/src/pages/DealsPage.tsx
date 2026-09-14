@@ -6,7 +6,9 @@ import { accountsApi, dealsApi } from '@/api/client';
 import type { Account, Deal } from '@/api/schemas';
 import { AppShell } from '@/components/app/AppShell';
 import { SEO } from '@/components/SEO';
-import { RecordForm, Field, fieldClass } from '@/components/app/RecordForm';
+import { RecordForm, Field, fieldClass, RecordSelect } from '@/components/app/RecordForm';
+import { CsvImportBar } from '@/components/app/CsvImportBar';
+import { DEAL_SAMPLE, importDeals } from '@/lib/crmBulk';
 import { cn } from '@/lib/utils';
 
 const STAGES: Deal['stage'][] = [
@@ -50,6 +52,7 @@ export default function DealsPage() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(false);
   const [form, setForm] = useState({ name: '', accountId: '', amount: '' });
   const [saving, setSaving] = useState(false);
 
@@ -92,7 +95,7 @@ export default function DealsPage() {
       <div className="px-4 sm:px-6 py-6 flex flex-col h-full">
 
         {/* Header */}
-        <div className="flex items-center justify-between mb-4 flex-shrink-0">
+        <div className="flex items-center justify-between mb-4 flex-shrink-0 gap-3 flex-wrap">
           <div>
             <h1 className="text-[1.25rem] font-extrabold tracking-tight text-slate-900 dark:text-white">Deals</h1>
             <p className="text-[0.82rem] text-slate-500 dark:text-slate-400 mt-0.5">
@@ -100,16 +103,31 @@ export default function DealsPage() {
               <span className="text-emerald-600 dark:text-emerald-400 font-semibold">${(totalWon/1000).toFixed(0)}K</span> closed won
             </p>
           </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <CsvImportBar
+              sampleName="deals-sample.csv"
+              sampleCsv={DEAL_SAMPLE}
+              onRows={async (rows) => {
+                const out = await importDeals(rows);
+                await load();
+                return out;
+              }}
+            />
           <button
             type="button"
             onClick={() => {
               setCreating(true);
-              void accountsApi.list(1, 50).then((r) => setAccounts(r.items)).catch(() => setAccounts([]));
+              setAccountsLoading(true);
+              void accountsApi.list(1, 100)
+                .then((r) => setAccounts(r.items))
+                .catch(() => setAccounts([]))
+                .finally(() => setAccountsLoading(false));
             }}
             className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:shadow-lg hover:shadow-indigo-500/25 hover:-translate-y-0.5 transition-all"
           >
             <Plus size={15} /> Add deal
           </button>
+          </div>
         </div>
 
         {/* Kanban board */}
@@ -186,11 +204,18 @@ export default function DealsPage() {
       {creating && (
         <RecordForm title="New deal" onClose={() => setCreating(false)} onSubmit={(e) => void createDeal(e)} busy={saving}>
           <Field label="Name"><input required className={fieldClass} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-          <Field label="Company">
-            <select required className={fieldClass} value={form.accountId} onChange={(e) => setForm({ ...form, accountId: e.target.value })}>
-              <option value="">Select company</option>
-              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
+          <Field label="Company" asLabel={false}>
+            <RecordSelect
+              required
+              allowEmpty={false}
+              value={form.accountId}
+              onChange={(accountId) => setForm({ ...form, accountId })}
+              options={accounts.map((a) => ({ value: a.id, label: a.name }))}
+              loading={accountsLoading}
+              placeholder="Select company"
+              searchPlaceholder="Search companies…"
+              emptyHint="No companies yet. Add one on Companies first."
+            />
           </Field>
           <Field label="Amount"><input type="number" min="0" className={fieldClass} value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} /></Field>
         </RecordForm>

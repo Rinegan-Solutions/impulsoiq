@@ -16,7 +16,13 @@ import type { SNSHandler } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 
-const ddb      = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb      = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
+  // DynamoDB rejects an undefined attribute value outright. Optional fields
+  // (starter, campaignId, agentRunId, ...) are routinely undefined, so without
+  // this every Put/Update carrying one fails at runtime with
+  // "Pass options.removeUndefinedValues=true".
+  marshallOptions: { removeUndefinedValues: true },
+});
 const TABLE    = process.env.DYNAMODB_TABLE!;
 const TTL_SECS = 24 * 60 * 60; // 24 hours
 

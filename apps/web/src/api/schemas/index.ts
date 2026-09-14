@@ -327,3 +327,25 @@ export type DashboardStats = z.infer<typeof DashboardStatsSchema>;
 export type RegistryEntry = z.infer<typeof RegistryEntrySchema>;
 export type KnowledgeArticle = z.infer<typeof KnowledgeArticleSchema>;
 export type TemplateActivation = z.infer<typeof TemplateActivationSchema>;
+
+// ─── Invitations ──────────────────────────────────────────────────────────────
+// Deliberately no token or token hash: crm-read never selects it, and the raw
+// token exists only in the email that was sent.
+
+export const InvitationRoleSchema = z.enum(['admin', 'manager', 'member']);
+
+export const InvitationSchema = z.object({
+  id: z.string(),
+  email: z.string(),
+  role: InvitationRoleSchema,
+  status: z.enum(['pending', 'accepted', 'revoked']),
+  invitedBy: z.string(),
+  expiresAt: z.string(),
+  acceptedAt: z.string().nullable().optional(),
+  createdAt: z.string(),
+  /** Computed by the API: pending, but past its expiry. */
+  expired: z.boolean().nullable().optional(),
+});
+
+export type Invitation = z.infer<typeof InvitationSchema>;
+export type InvitationRole = z.infer<typeof InvitationRoleSchema>;

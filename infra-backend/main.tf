@@ -75,6 +75,7 @@ module "lambda" {
   metering_table      = module.data.metering_table_name
   reporting_table     = module.data.reporting_table_name
   app_secret_arn      = module.secrets.app_secret_arn
+  web_host            = local.web_host
 
   stripe_price_starter_monthly      = var.stripe_price_starter_monthly
   stripe_price_starter_annual       = var.stripe_price_starter_annual

@@ -69,9 +69,12 @@ function RequireAuth() {
 }
 
 /**
- * Landing, sign-in and sign-up are for signed-out visitors. A signed-in user is
- * sent on to ?next (validated) or Home. SignIn relies on this: it
- * publishes the new session and this redirect is what moves the user on.
+ * Sign-in and sign-up are for signed-out visitors. A signed-in user is sent on
+ * to ?next (validated) or Home. SignIn relies on this: it publishes the new
+ * session and this redirect is what moves the user on.
+ *
+ * The marketing landing page is not in this gate — signed-in people can still
+ * read it; its CTAs send them back to the workspace.
  */
 function PublicOnly() {
   const { status } = useAuth();
@@ -85,8 +88,9 @@ function PublicOnly() {
 export default function App() {
   return (
     <Routes>
+      <Route path="/" element={<LandingPage />} />
+
       <Route element={<PublicOnly />}>
-        <Route path="/"        element={<LandingPage />} />
         <Route path="/sign-in" element={<SignIn />} />
         <Route path="/sign-up" element={<SignUp />} />
       </Route>
@@ -126,7 +130,6 @@ export default function App() {
         <Route path="/support/insight" element={<SupportInsightPage />} />
       </Route>
 
-      {/* "/" itself decides: landing when signed out, Home when signed in. */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

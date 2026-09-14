@@ -12,7 +12,13 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { getDb } from './db';
 
-const metering = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const metering = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
+  // DynamoDB rejects an undefined attribute value outright. Optional fields
+  // (starter, campaignId, agentRunId, ...) are routinely undefined, so without
+  // this every Put/Update carrying one fails at runtime with
+  // "Pass options.removeUndefinedValues=true".
+  marshallOptions: { removeUndefinedValues: true },
+});
 
 type Operation =
   | 'get_contact'
@@ -65,6 +71,8 @@ type Operation =
   | 'get_email_verification'
   | 'get_outbound_quality'
   | 'get_campaign_usage'
+  | 'list_invitations'
+  | 'find_invitation'       // direct invocation only (token lookup)
   | 'export_dsar'
   | 'export_audit'
   | 'get_channel_efficacy'
@@ -105,7 +113,7 @@ function tenantFromEvent(event: APIGatewayProxyEvent): string | null {
 // custom:tenant_id records the workspace an account ASKED for at sign-up — the
 // browser chose it. Membership is granted only by tenant-provisioner, which adds
 // the account to a Cognito group after checking it may join (it created the
-// workspace, or its verified email domain matches). An account whose
+// workspace, or it claimed a valid invitation). An account whose
 // provisioning failed or was refused has the claim but no group, and must reach
 // no data at all.
 const WORKSPACE_ROLES = new Set(['admin', 'manager', 'member']);
@@ -1160,6 +1168,45 @@ const dispatch: Handler<
             runningAgents: running.rows[0]?.n ?? 0,
           },
         };
+      }
+
+      case 'list_invitations': {
+        // Team management is an administrative view. token_hash is never
+        // selected — nothing in the product ever needs to read it back.
+        if (!('requestContext' in event) || !isManagerOrAdmin(event as APIGatewayProxyEvent)) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'Only admins and managers can view invitations' }) };
+        }
+        const rows = await db.query(
+          `SELECT id, email, role, status, invited_by, expires_at, accepted_at, created_at,
+                  (status = 'pending' AND expires_at <= NOW()) AS expired
+             FROM invitation
+            WHERE tenant_id = $1
+            ORDER BY created_at DESC
+            LIMIT 200`,
+          [tenantId],
+        );
+        return { result: rows.rows };
+      }
+
+      case 'find_invitation': {
+        // Looked up by token hash during sign-up, before any session exists, so
+        // it is reachable only by direct invocation from the services that need
+        // it (invitation-service resolve, tenant-provisioner PreSignUp).
+        if ('requestContext' in event) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'not available over the API' }) };
+        }
+        const tokenHash = String(payload.tokenHash ?? '');
+        if (tokenHash.length !== 64) return { result: null };
+        const rows = await db.query(
+          `SELECT i.id, i.tenant_id, i.email, i.role, i.status, i.expires_at,
+                  (i.status = 'pending' AND i.expires_at > NOW()) AS usable,
+                  t.name AS workspace_name
+             FROM invitation i
+             JOIN tenant t ON t.id = i.tenant_id
+            WHERE i.token_hash = $1`,
+          [tokenHash],
+        );
+        return { result: rows.rows[0] ?? null };
       }
 
       case 'export_dsar': {

@@ -29,6 +29,9 @@ type Operation =
   | 'upsert_sequence'
   | 'patch_tenant_config'
   | 'set_tenant_billing'    // restricted: billing-service only
+  | 'create_invitation'     // restricted: invitation-service only
+  | 'revoke_invitation'     // restricted: invitation-service only
+  | 'consume_invitation'    // restricted: tenant-provisioner only
   | 'save_sso_intent'
   | 'patch_expansion_config'
   | 'erase_dsar'
@@ -74,7 +77,7 @@ function tenantFromEvent(event: APIGatewayProxyEvent): string | null {
 // custom:tenant_id records the workspace an account ASKED for at sign-up — the
 // browser chose it. Membership is granted only by tenant-provisioner, which adds
 // the account to a Cognito group after checking it may join (it created the
-// workspace, or its verified email domain matches). An account whose
+// workspace, or it claimed a valid invitation). An account whose
 // provisioning failed or was refused has the claim but no group, and must reach
 // no data at all.
 const WORKSPACE_ROLES = new Set(['admin', 'manager', 'member']);
@@ -460,6 +463,77 @@ async function upsertSequence(db: ReturnType<typeof getDb> extends Promise<infer
   return res.rows[0].id as string;
 }
 
+const INVITE_ROLES = new Set(['admin', 'manager', 'member']);
+
+/**
+ * Create (or replace) the single live invitation for an email in a workspace.
+ *
+ * The caller supplies only a SHA-256 hash of the token — the raw value lives in
+ * the emailed link and nowhere else, so a database copy yields no usable invite.
+ * Re-inviting revokes the previous pending row first, which keeps "one live
+ * invitation per person" true and makes resend a normal create.
+ */
+async function createInvitation(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  const email = String(p.email ?? '').trim().toLowerCase();
+  const role = String(p.role ?? '');
+  const tokenHash = String(p.tokenHash ?? '');
+  const invitedBy = String(p.invitedBy ?? '');
+  const expiresAt = String(p.expiresAt ?? '');
+  if (!email.includes('@')) throw new Error('create_invitation: a valid email is required');
+  if (!INVITE_ROLES.has(role)) throw new Error(`create_invitation: invalid role ${role}`);
+  if (tokenHash.length !== 64) throw new Error('create_invitation: tokenHash must be a sha256 hex digest');
+  if (!expiresAt) throw new Error('create_invitation: expiresAt is required');
+
+  await db.query(
+    `UPDATE invitation SET status = 'revoked', updated_at = NOW()
+      WHERE tenant_id = $1 AND email = $2 AND status = 'pending'`,
+    [tenantId, email],
+  );
+  const res = await db.query(
+    `INSERT INTO invitation (tenant_id, email, role, token_hash, invited_by, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6::timestamptz)
+     RETURNING id`,
+    [tenantId, email, role, tokenHash, invitedBy, expiresAt],
+  );
+  return res.rows[0].id as string;
+}
+
+async function revokeInvitation(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  const id = String(p.id ?? '');
+  if (!id) throw new Error('revoke_invitation: id is required');
+  const res = await db.query(
+    `UPDATE invitation SET status = 'revoked', updated_at = NOW()
+      WHERE id = $1 AND tenant_id = $2 AND status = 'pending'
+      RETURNING id`,
+    [id, tenantId],
+  );
+  if (res.rowCount === 0) throw new Error('revoke_invitation: no pending invitation with that id');
+  return id;
+}
+
+/**
+ * Claim an invitation, atomically.
+ *
+ * The WHERE clause is the guard: only a pending, unexpired invitation for this
+ * exact email can move to accepted, and it can only do so once. Two concurrent
+ * confirmations cannot both succeed, so a duplicate request cannot produce two
+ * memberships. Returns the granted role, or null when there was nothing to claim.
+ */
+async function consumeInvitation(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  const email = String(p.email ?? '').trim().toLowerCase();
+  const sub = String(p.sub ?? '');
+  if (!email) return { id: null as string | null, role: null as string | null };
+  const res = await db.query(
+    `UPDATE invitation
+        SET status = 'accepted', accepted_at = NOW(), accepted_sub = $3, updated_at = NOW()
+      WHERE tenant_id = $1 AND email = $2 AND status = 'pending' AND expires_at > NOW()
+      RETURNING id, role`,
+    [tenantId, email, sub],
+  );
+  const row = res.rows[0];
+  return { id: (row?.id as string) ?? null, role: (row?.role as string) ?? null };
+}
+
 function isManagerOrAdmin(event: APIGatewayProxyEvent): boolean {
   const claims = event.requestContext?.authorizer?.claims as Record<string, unknown> | undefined;
   const raw = claims?.['cognito:groups'];
@@ -796,6 +870,44 @@ const dispatch: Handler<
         entityType = 'tenant';
         extra = { tier: payload.tier };
         break;
+
+      case 'create_invitation':
+        // The API-facing RBAC (who may invite which role) lives in
+        // invitation-service, which also mints the token and sends the mail.
+        // Refusing API Gateway here means that path cannot be skipped.
+        if ('requestContext' in event) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'invitations require the invitation service' }) };
+        }
+        if (req.actorId !== 'invitation-service') {
+          return { ok: false, error: 'create_invitation: caller must identify as invitation-service' };
+        }
+        entityId   = await createInvitation(db, tenantId, payload);
+        entityType = 'invitation';
+        extra = { role: payload.role };
+        break;
+
+      case 'revoke_invitation':
+        if ('requestContext' in event) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'invitations require the invitation service' }) };
+        }
+        if (req.actorId !== 'invitation-service') {
+          return { ok: false, error: 'revoke_invitation: caller must identify as invitation-service' };
+        }
+        entityId   = await revokeInvitation(db, tenantId, payload);
+        entityType = 'invitation';
+        break;
+
+      case 'consume_invitation': {
+        if ('requestContext' in event) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'invitations are claimed during sign-up' }) };
+        }
+        if (req.actorId !== 'tenant-provisioner') {
+          return { ok: false, error: 'consume_invitation: caller must identify as tenant-provisioner' };
+        }
+        const claimed = await consumeInvitation(db, tenantId, payload);
+        // No row means no valid invitation — the caller must not grant a role.
+        return { ok: true, id: claimed.id, role: claimed.role };
+      }
 
       case 'save_sso_intent':
         if (!('requestContext' in event) || !isManagerOrAdmin(event as APIGatewayProxyEvent)) {

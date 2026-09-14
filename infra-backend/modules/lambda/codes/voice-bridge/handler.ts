@@ -41,7 +41,13 @@ import jwksClient from 'jwks-rsa';
 
 const REGION = process.env.AWS_REGION ?? 'eu-west-2';
 
-const dynamo    = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
+const dynamo    = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), {
+  // DynamoDB rejects an undefined attribute value outright. Optional fields
+  // (starter, campaignId, agentRunId, ...) are routinely undefined, so without
+  // this every Put/Update carrying one fails at runtime with
+  // "Pass options.removeUndefinedValues=true".
+  marshallOptions: { removeUndefinedValues: true },
+});
 const bedrock   = new BedrockRuntimeClient({ region: REGION });
 const agentcore = new BedrockAgentCoreClient({ region: REGION });
 const ssm       = new SSMClient({ region: REGION });

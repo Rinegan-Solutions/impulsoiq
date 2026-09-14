@@ -63,9 +63,17 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     };
   }
 
-  // Reject internal domains — no point showing sign-up nudges for gmail.com etc.
-  // Must match PUBLIC_EMAIL_DOMAINS in tenant-provisioner, which never stores
-  // these as a workspace's email_domain and so never admits anyone by them.
+  // Reject public mailbox providers: a workspace created from a gmail.com
+  // address would otherwise match every gmail.com user who types their address
+  // here, telling each of them a stranger's workspace exists. Must match
+  // PUBLIC_EMAIL_DOMAINS in tenant-provisioner, which never records these as a
+  // workspace's email_domain.
+  //
+  // NOTE ON WHAT THIS ENDPOINT IS FOR NOW. It used to drive a join flow; a
+  // domain match granted membership. It no longer grants anything — membership
+  // comes from an invitation — so this only decides whether sign-up and sign-in
+  // show the "ask your workspace admin" modal. It is unauthenticated and
+  // returns nothing but a workspace's display name and address.
   const COMMON_PROVIDERS = new Set([
     'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.co.uk', 'hotmail.com',
     'hotmail.co.uk', 'outlook.com', 'live.com', 'msn.com', 'aol.com',

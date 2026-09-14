@@ -24,7 +24,13 @@ const REGION         = process.env.AWS_REGION ?? 'eu-west-2';
 const DSQL_ENDPOINT  = process.env.DSQL_ENDPOINT!;
 const DYNAMODB_TABLE = process.env.DYNAMODB_TABLE!;
 
-const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
+const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), {
+  // DynamoDB rejects an undefined attribute value outright. Optional fields
+  // (starter, campaignId, agentRunId, ...) are routinely undefined, so without
+  // this every Put/Update carrying one fails at runtime with
+  // "Pass options.removeUndefinedValues=true".
+  marshallOptions: { removeUndefinedValues: true },
+});
 
 let _db: Client | null = null;
 

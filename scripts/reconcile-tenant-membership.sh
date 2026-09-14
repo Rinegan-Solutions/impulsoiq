@@ -121,6 +121,13 @@ while IFS=$'\t' read -r USERNAME EVENT_FILE; do
   elif [ "$ENABLED" != "True" ]; then
     echo "  ${USERNAME}: refused — may not join its workspace; account disabled"
     refused=$((refused + 1))
+  elif grep -q '"reconcileOutcome": *"no-invitation"' "$WORK/invoke-out.json" 2>/dev/null; then
+    # Membership comes from an invitation now, and this account holds none --
+    # it was never invited, or its invitation expired or was revoked. That is a
+    # refusal, not a provisioning failure: without a group the API denies it
+    # everything, and an admin can invite the person if they should have access.
+    echo "  ${USERNAME}: refused — no invitation to claim; left without a role"
+    refused=$((refused + 1))
   else
     echo "  ${USERNAME}: STILL UNPROVISIONED"
     failed=$((failed + 1))

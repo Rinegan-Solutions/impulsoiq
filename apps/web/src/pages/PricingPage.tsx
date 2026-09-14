@@ -10,6 +10,7 @@ import { cn } from '@/lib/utils';
 import { useAuth, roleOf } from '@/lib/auth/useAuth';
 import { billingApi } from '@/api/client';
 import { ApiError } from '@/api/http';
+import { useMarketingCta } from '@/lib/marketingCta';
 
 type TierId = 'free' | 'starter' | 'growth' | 'enterprise';
 
@@ -155,6 +156,7 @@ export default function PricingPage() {
   const [error, setError] = useState<string | null>(null);
   const { status, user } = useAuth();
   const navigate = useNavigate();
+  const { to: marketingTo, startLabel } = useMarketingCta();
   const canPay = user && (roleOf(user) === 'admin' || roleOf(user) === 'manager');
 
   async function startCheckout(tier: TierId) {
@@ -363,10 +365,10 @@ export default function PricingPage() {
             </p>
             <div className="flex justify-center flex-wrap gap-3">
               <Link
-                to="/sign-up"
+                to={marketingTo}
                 className="inline-flex items-center gap-2 px-6 py-3.5 font-semibold text-indigo-700 bg-white rounded-xl"
               >
-                Start free — no credit card
+                {startLabel}
                 <ArrowRight size={16} />
               </Link>
               <a

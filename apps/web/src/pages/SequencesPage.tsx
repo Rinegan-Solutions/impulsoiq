@@ -98,7 +98,7 @@ export default function SequencesPage() {
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-[0.7rem] text-slate-400 w-5">{i + 1}</span>
                     <select
-                      className="h-8 rounded-lg border border-slate-200 dark:border-white/[0.1] bg-transparent text-sm px-2"
+                      className="h-8 rounded-lg border border-slate-200 dark:border-white/[0.1] bg-white dark:bg-[#0a1220] text-slate-900 dark:text-white [color-scheme:light] dark:[color-scheme:dark] text-sm px-2"
                       value={step.type}
                       onChange={(e) => setSteps((prev) => prev.map((s, j) => j === i ? { ...s, type: e.target.value as DraftStep['type'] } : s))}
                     >

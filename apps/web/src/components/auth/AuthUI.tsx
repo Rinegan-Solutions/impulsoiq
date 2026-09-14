@@ -225,6 +225,7 @@ export function PrimaryBtn({ loading, children, className, ...props }: PrimaryBt
     <button
       className={cn(
         'relative w-full h-11 rounded-xl font-semibold text-white text-sm overflow-hidden',
+        'inline-flex items-center justify-center gap-2',
         'bg-gradient-to-r from-indigo-600 to-violet-600',
         'hover:shadow-lg hover:shadow-indigo-500/30 hover:-translate-y-0.5 active:translate-y-0',
         'transition-all duration-200',

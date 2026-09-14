@@ -4,9 +4,27 @@
 
 @layer base {
   *, *::before, *::after { box-sizing: border-box; }
-  html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; scroll-behavior: smooth; }
+  html {
+    color-scheme: light;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    scroll-behavior: smooth;
+  }
+  @media (prefers-color-scheme: dark) {
+    html { color-scheme: dark; }
+  }
   body { font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif; }
   img, svg { display: block; max-width: 100%; }
+  select option {
+    background-color: #ffffff;
+    color: #0f172a;
+  }
+  @media (prefers-color-scheme: dark) {
+    select option {
+      background-color: #0a1220;
+      color: #f8fafc;
+    }
+  }
 }
 
 @layer utilities {

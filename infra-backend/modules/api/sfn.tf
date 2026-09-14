@@ -8,6 +8,10 @@
 # CALL-E completes the call.
 #
 # All Lambda invocations use arn:aws:states:::lambda:invoke resource.
+# AgentCore runtimes are NOT Lambdas. Enrich / outreach / voice go through
+# agent-invoker with agentRuntimeArn in the payload. Passing a
+# bedrock-agentcore ARN as FunctionName fails at runtime:
+#   Lambda.AWSLambdaException: 1 validation error detected: Value 'arn:aws:bedrock-agentcore:...'
 # All task states include OCC_CONFLICT retry to handle DSQL optimistic
 # concurrency control errors.
 
@@ -76,11 +80,15 @@ resource "aws_sfn_state_machine" "campaign" {
         Type     = "Task"
         Resource = "arn:aws:states:::lambda:invoke"
         Parameters = {
-          FunctionName = var.research_enrichment_agent_arn
+          FunctionName = var.agent_invoker_lambda_arn
           Payload = {
-            "tenantId.$" : "$.tenantId"
-            "contactId.$" : "$.contactId"
-            "campaignId.$" : "$.campaignId"
+            throwOnError     = true
+            agentRuntimeArn  = var.research_enrichment_agent_arn
+            payload = {
+              "tenantId.$"   = "$.tenantId"
+              "contactId.$"  = "$.contactId"
+              "campaignId.$" = "$.campaignId"
+            }
           }
         }
         ResultPath = "$.enrichmentResult"
@@ -102,7 +110,7 @@ resource "aws_sfn_state_machine" "campaign" {
             Next          = "HandleEnrichmentGap"
           },
           {
-            Variable      = "$.enrichmentResult.ok"
+            Variable      = "$.enrichmentResult.Payload.response.ok"
             BooleanEquals = false
             Next          = "HandleEnrichmentGap"
           }
@@ -288,14 +296,18 @@ resource "aws_sfn_state_machine" "campaign" {
         Type     = "Task"
         Resource = "arn:aws:states:::lambda:invoke"
         Parameters = {
-          FunctionName = var.outreach_agent_arn
+          FunctionName = var.agent_invoker_lambda_arn
           Payload = {
-            "tenantId.$" : "$.tenantId"
-            "contactId.$" : "$.contactId"
-            "campaignId.$" : "$.campaignId"
-            "channel" : "sms"
-            "hasConsent" : true
-            "approvalMode" : "auto_send"
+            throwOnError    = true
+            agentRuntimeArn = var.outreach_agent_arn
+            payload = {
+              "tenantId.$"   = "$.tenantId"
+              "contactId.$"  = "$.contactId"
+              "campaignId.$" = "$.campaignId"
+              channel        = "sms"
+              hasConsent     = true
+              approvalMode   = "auto_send"
+            }
           }
         }
         ResultPath = "$.sendSmsResult"
@@ -354,14 +366,18 @@ resource "aws_sfn_state_machine" "campaign" {
         Type     = "Task"
         Resource = "arn:aws:states:::lambda:invoke"
         Parameters = {
-          FunctionName = var.outreach_agent_arn
+          FunctionName = var.agent_invoker_lambda_arn
           Payload = {
-            "tenantId.$" : "$.tenantId"
-            "contactId.$" : "$.contactId"
-            "campaignId.$" : "$.campaignId"
-            "channel" : "email"
-            "hasConsent" : true
-            "approvalMode" : "human_in_loop"
+            throwOnError    = true
+            agentRuntimeArn = var.outreach_agent_arn
+            payload = {
+              "tenantId.$"   = "$.tenantId"
+              "contactId.$"  = "$.contactId"
+              "campaignId.$" = "$.campaignId"
+              channel        = "email"
+              hasConsent     = true
+              approvalMode   = "human_in_loop"
+            }
           }
         }
         ResultPath = "$.draftEmailResult"
@@ -440,15 +456,19 @@ resource "aws_sfn_state_machine" "campaign" {
         Type     = "Task"
         Resource = "arn:aws:states:::lambda:invoke"
         Parameters = {
-          FunctionName = var.outreach_agent_arn
+          FunctionName = var.agent_invoker_lambda_arn
           Payload = {
-            "tenantId.$" : "$.tenantId"
-            "contactId.$" : "$.contactId"
-            "campaignId.$" : "$.campaignId"
-            "channel" : "email"
-            "hasConsent" : true
-            "approvalMode" : "auto_send"
-            "approval.$" : "$.approvalResult"
+            throwOnError    = true
+            agentRuntimeArn = var.outreach_agent_arn
+            payload = {
+              "tenantId.$"   = "$.tenantId"
+              "contactId.$"  = "$.contactId"
+              "campaignId.$" = "$.campaignId"
+              channel        = "email"
+              hasConsent     = true
+              approvalMode   = "auto_send"
+              "approval.$"   = "$.approvalResult"
+            }
           }
         }
         ResultPath = "$.sendEmailResult"
@@ -629,15 +649,19 @@ resource "aws_sfn_state_machine" "campaign" {
         Type     = "Task"
         Resource = "arn:aws:states:::lambda:invoke.waitForTaskToken"
         Parameters = {
-          FunctionName = var.voice_agent_arn
+          FunctionName = var.agent_invoker_lambda_arn
           Payload = {
-            "tenantId.$" : "$.tenantId"
-            "contactId.$" : "$.contactId"
-            "campaignId.$" : "$.campaignId"
-            "agentRunId.$" : "$.agentRunId"
-            "callGoal" : "qualification"
-            "taskToken.$" : "$$.Task.Token"
-            "idempotencyKey.$" : "$$.Execution.Name"
+            throwOnError    = true
+            agentRuntimeArn = var.voice_agent_arn
+            payload = {
+              "tenantId.$"      = "$.tenantId"
+              "contactId.$"     = "$.contactId"
+              "campaignId.$"    = "$.campaignId"
+              "agentRunId.$"    = "$.agentRunId"
+              callGoal          = "qualification"
+              "taskToken.$"     = "$$.Task.Token"
+              "idempotencyKey.$" = "$$.Execution.Name"
+            }
           }
         }
         HeartbeatSeconds = 86400
@@ -806,9 +830,7 @@ resource "aws_iam_role_policy" "sfn" {
         Action = ["lambda:InvokeFunction"]
         Resource = [
           var.crm_write_service_arn,
-          var.research_enrichment_agent_arn,
-          var.outreach_agent_arn,
-          var.voice_agent_arn,
+          var.agent_invoker_lambda_arn,
           var.sequence_step_arn,
         ]
       },

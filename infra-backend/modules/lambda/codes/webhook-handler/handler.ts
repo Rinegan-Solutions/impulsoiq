@@ -22,7 +22,13 @@ import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 
 const eb    = new EventBridgeClient({});
 const sfn   = new SFNClient({});
-const ddb   = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb   = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
+  // DynamoDB rejects an undefined attribute value outright. Optional fields
+  // (starter, campaignId, agentRunId, ...) are routinely undefined, so without
+  // this every Put/Update carrying one fails at runtime with
+  // "Pass options.removeUndefinedValues=true".
+  marshallOptions: { removeUndefinedValues: true },
+});
 
 const EVENT_BUS     = process.env.EVENT_BUS_ARN!;
 const DYNAMODB_TABLE = process.env.DYNAMODB_TABLE!;

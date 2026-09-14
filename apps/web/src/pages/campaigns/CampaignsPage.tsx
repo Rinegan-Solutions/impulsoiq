@@ -180,7 +180,7 @@ export default function CampaignsPage() {
 
                   <label className="block text-[0.7rem] font-semibold text-slate-400 mb-1">Sequence</label>
                   <select
-                    className="w-full h-8 mb-3 rounded-lg border border-slate-200 dark:border-white/[0.1] bg-transparent text-[0.78rem] px-2"
+                    className="w-full h-8 mb-3 rounded-lg border border-slate-200 dark:border-white/[0.1] bg-white dark:bg-[#0a1220] text-slate-900 dark:text-white [color-scheme:light] dark:[color-scheme:dark] text-[0.78rem] px-2"
                     value={String((c.config as Record<string, unknown> | undefined)?.sequenceId ?? '')}
                     onChange={(e) => void attachSequence(c, e.target.value)}
                   >

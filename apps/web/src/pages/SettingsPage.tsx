@@ -1,15 +1,20 @@
-import { FormEvent, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { User, Building2, Code2, Check, Copy, Loader2, CreditCard, Shield } from 'lucide-react';
+import {
+  User, Building2, Code2, Check, Copy, Loader2, CreditCard, Shield,
+  UserPlus, Mail, RotateCw, X, Clock, Ban,
+} from 'lucide-react';
 import { AppShell } from '@/components/app/AppShell';
+import { selectClass } from '@/components/app/RecordForm';
 import { SEO } from '@/components/SEO';
 import { cn } from '@/lib/utils';
-import { useAuth, roleOf, ROLE_LABEL, initialsOf, displayNameOf } from '@/lib/auth/useAuth';
+import { useAuth, roleOf, ROLE_LABEL, initialsOf, displayNameOf, type Role } from '@/lib/auth/useAuth';
 import { updateDisplayName, authErrorMessage } from '@/lib/auth/cognito';
 import { useTenant } from '@/lib/useTenant';
 import { workspaceHost } from '@/lib/tenant';
-import { tenantApi, billingApi } from '@/api/client';
+import { tenantApi, billingApi, invitationsApi, INVITABLE_ROLES } from '@/api/client';
+import type { Invitation, InvitationRole } from '@/api/schemas';
 import { ApiError } from '@/api/http';
 
 /**
@@ -248,16 +253,7 @@ export default function SettingsPage() {
                   </Field>
                 </Card>
 
-                <Card title="Team">
-                  <p className="text-[0.84rem] text-slate-600 dark:text-slate-400 leading-relaxed">
-                    Teammates join by creating an account at{' '}
-                    <span className="font-mono text-[0.8rem] text-slate-800 dark:text-slate-200">{host}/sign-up</span>{' '}
-                    with their work email. When their email domain matches this workspace, sign-up offers to add them.
-                  </p>
-                  <p className="text-[0.84rem] text-slate-600 dark:text-slate-400 leading-relaxed mt-3">
-                    Roles are assigned automatically: whoever creates a workspace is its admin, and people who join are members.
-                  </p>
-                </Card>
+                <TeamCard callerRole={role} workspaceName={tenant?.name ?? ''} />
               </>
             )}
 
@@ -368,6 +364,255 @@ function downloadJson(filename: string, data: unknown) {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Workspace → Team.
+ *
+ * Membership is granted by invitation only. Joining by matching email domain
+ * was removed: control of a mailbox at a customer's domain is not the same as
+ * authorisation to see their CRM.
+ *
+ * WHAT THIS UI DOES AND DOES NOT DECIDE
+ * Nothing. Every rule is enforced by invitation-service against the caller's
+ * Cognito groups — a member who calls POST /invitations directly gets a 403
+ * whatever this renders. The role list below is narrowed only so nobody is
+ * offered a choice that would be refused:
+ *
+ *   admin   -> admin, manager, member
+ *   manager -> member
+ *   member  -> cannot invite
+ *
+ * WHY THERE IS NO MEMBER LIST
+ * Members live in Cognito, not in DSQL, and no operation lists them yet. An
+ * invented list would be indistinguishable from a real one. Pending and past
+ * invitations are real data and are shown; current membership is not claimed.
+ *
+ * RESEND IS A REISSUE
+ * There is no way to re-send the original token: only its SHA-256 hash was
+ * stored. Resending mints a NEW invitation and revokes the previous pending one
+ * for that address, so an old link in an old inbox stops working.
+ */
+function TeamCard({ callerRole, workspaceName }: { callerRole: Role | null; workspaceName: string }) {
+  const allowedRoles: InvitationRole[] = callerRole ? (INVITABLE_ROLES[callerRole] ?? []) : [];
+  const canInvite = allowedRoles.length > 0;
+
+  const [invites, setInvites] = useState<Invitation[] | null>(null);
+  const [loadError, setLoadError] = useState('');
+
+  const [email, setEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<InvitationRole>(allowedRoles[allowedRoles.length - 1] ?? 'member');
+  const [sending, setSending] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      setInvites(await invitationsApi.list());
+      setLoadError('');
+    } catch (err) {
+      // A member is not permitted to list invitations; that is expected, not a
+      // failure worth showing as one.
+      if (err instanceof ApiError && err.status === 403) setInvites([]);
+      else setLoadError(err instanceof Error ? err.message : 'Could not load invitations.');
+    }
+  }, []);
+
+  useEffect(() => { if (canInvite) void load(); else setInvites([]); }, [canInvite, load]);
+
+  async function send(e: FormEvent) {
+    e.preventDefault();
+    const address = email.trim().toLowerCase();
+    if (!address.includes('@')) { setError('Enter a valid email address.'); return; }
+    setError(''); setNotice(''); setSending(true);
+    try {
+      const res = await invitationsApi.create({ email: address, role: inviteRole, workspaceName });
+      // 202 means the row exists but SES refused. Saying "invited" there would
+      // be a lie the admin only discovers when nobody turns up.
+      setNotice(res.emailed === false
+        ? `Invitation created for ${address}, but the email could not be sent. Use Resend.`
+        : `Invitation sent to ${address}.`);
+      setEmail('');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not send that invitation.');
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function revoke(invite: Invitation) {
+    setError(''); setNotice(''); setBusyId(invite.id);
+    try {
+      await invitationsApi.revoke(invite.id);
+      setNotice(`Invitation to ${invite.email} revoked. The link in that email no longer works.`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not revoke that invitation.');
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function resend(invite: Invitation) {
+    setError(''); setNotice(''); setBusyId(invite.id);
+    try {
+      const res = await invitationsApi.create({
+        email: invite.email, role: invite.role, workspaceName,
+      });
+      setNotice(res.emailed === false
+        ? `New invitation created for ${invite.email}, but the email could not be sent.`
+        : `A new invitation was sent to ${invite.email}. The previous link no longer works.`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not resend that invitation.');
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (!canInvite) {
+    return (
+      <Card title="Team">
+        <p className="text-[0.84rem] text-slate-600 dark:text-slate-400 leading-relaxed">
+          People join this workspace by invitation from an admin or manager. Your role
+          ({callerRole ? ROLE_LABEL[callerRole] : 'none'}) cannot send invitations — ask an
+          admin if someone needs access.
+        </p>
+      </Card>
+    );
+  }
+
+  const pending = (invites ?? []).filter(i => i.status === 'pending' && !i.expired);
+  const past = (invites ?? []).filter(i => i.status !== 'pending' || i.expired);
+
+  return (
+    <Card title="Team">
+      <p className="text-[0.84rem] text-slate-600 dark:text-slate-400 leading-relaxed">
+        Invite people by email. They get a link that works once and expires after 7 days,
+        and they join with the role you choose here — nothing they do during sign-up can change it.
+      </p>
+
+      <form onSubmit={send} className="mt-4 flex flex-col sm:flex-row gap-2">
+        <label className="sr-only" htmlFor="invite-email">Email address</label>
+        <input
+          id="invite-email"
+          type="email"
+          value={email}
+          onChange={e => { setEmail(e.target.value); setError(''); }}
+          placeholder="teammate@company.com"
+          className="flex-1 min-w-0 px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-white/[0.1] bg-white dark:bg-white/[0.03] text-[0.85rem] text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+        />
+        <label className="sr-only" htmlFor="invite-role">Role</label>
+        <select
+          id="invite-role"
+          value={inviteRole}
+          onChange={e => setInviteRole(e.target.value as InvitationRole)}
+          className={cn(selectClass, 'w-auto h-auto px-3.5 py-2.5 text-[0.85rem] focus:outline-none focus:ring-2 focus:ring-indigo-500/40')}
+        >
+          {allowedRoles.map(r => (
+            <option key={r} value={r}>{ROLE_LABEL[r]}</option>
+          ))}
+        </select>
+        <button
+          type="submit"
+          disabled={sending}
+          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white text-[0.85rem] font-semibold transition-colors"
+        >
+          {sending ? <Loader2 size={15} className="animate-spin" /> : <UserPlus size={15} />}
+          Invite
+        </button>
+      </form>
+
+      {callerRole === 'manager' && (
+        <p className="mt-2 text-[0.74rem] text-slate-400 dark:text-slate-600">
+          As a manager you can invite members. Only an admin can grant manager or admin access.
+        </p>
+      )}
+
+      {notice && (
+        <p className="mt-3 text-[0.8rem] text-emerald-600 dark:text-emerald-400">{notice}</p>
+      )}
+      {error && (
+        <p className="mt-3 text-[0.8rem] text-rose-600 dark:text-rose-400">{error}</p>
+      )}
+      {loadError && (
+        <p className="mt-3 text-[0.8rem] text-rose-600 dark:text-rose-400">{loadError}</p>
+      )}
+
+      {/* ── Pending ── */}
+      <div className="mt-6">
+        <h4 className="text-[0.78rem] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-600">
+          Pending invitations
+        </h4>
+        {invites === null ? (
+          <p className="mt-3 text-[0.82rem] text-slate-400 dark:text-slate-600">Loading…</p>
+        ) : pending.length === 0 ? (
+          <p className="mt-3 text-[0.82rem] text-slate-400 dark:text-slate-600">No invitations are waiting to be accepted.</p>
+        ) : (
+          <ul className="mt-3 flex flex-col gap-2">
+            {pending.map(invite => (
+              <li
+                key={invite.id}
+                className="flex flex-wrap items-center gap-3 px-4 py-3 rounded-2xl border border-slate-200 dark:border-white/[0.08] bg-slate-50/60 dark:bg-white/[0.02]"
+              >
+                <Mail size={15} className="text-slate-400 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-[0.84rem] font-medium text-slate-900 dark:text-white truncate">{invite.email}</p>
+                  <p className="text-[0.74rem] text-slate-400 dark:text-slate-600">
+                    {ROLE_LABEL[invite.role]} · invited by {invite.invitedBy} · expires{' '}
+                    {new Date(invite.expiresAt).toLocaleDateString()}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void resend(invite)}
+                  disabled={busyId === invite.id}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[0.78rem] font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/[0.06] disabled:opacity-50 transition-colors"
+                >
+                  <RotateCw size={13} /> Resend
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void revoke(invite)}
+                  disabled={busyId === invite.id}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[0.78rem] font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-500/10 disabled:opacity-50 transition-colors"
+                >
+                  <X size={13} /> Revoke
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {/* ── History ── */}
+      {past.length > 0 && (
+        <div className="mt-6">
+          <h4 className="text-[0.78rem] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-600">
+            Past invitations
+          </h4>
+          <ul className="mt-3 flex flex-col gap-1.5">
+            {past.slice(0, 20).map(invite => {
+              const state = invite.status === 'accepted' ? 'Accepted'
+                : invite.status === 'revoked' ? 'Revoked' : 'Expired';
+              const Icon = invite.status === 'accepted' ? Check
+                : invite.status === 'revoked' ? Ban : Clock;
+              return (
+                <li key={invite.id} className="flex items-center gap-3 px-4 py-2 text-[0.8rem]">
+                  <Icon size={13} className="text-slate-400 flex-shrink-0" />
+                  <span className="flex-1 min-w-0 truncate text-slate-600 dark:text-slate-400">{invite.email}</span>
+                  <span className="text-slate-400 dark:text-slate-600">{ROLE_LABEL[invite.role]}</span>
+                  <span className="text-slate-400 dark:text-slate-600">{state}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </Card>
+  );
 }
 
 function BillingCard({ tier, canPay, checkoutOk }: { tier?: string; canPay: boolean; checkoutOk: boolean }) {

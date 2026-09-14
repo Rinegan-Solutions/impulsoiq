@@ -318,6 +318,34 @@ ALTER TABLE call_result ADD COLUMN IF NOT EXISTS calling_window_allowed BOOLEAN;
 ALTER TABLE call_result ADD COLUMN IF NOT EXISTS calling_window_reason TEXT;
 ALTER TABLE call_result ADD COLUMN IF NOT EXISTS dnc_result TEXT;
 
+-- ── Workspace invitations ────────────────────────────────────────────────────
+-- Joining an existing workspace is by invitation only. Matching email domains
+-- used to be enough, which meant anyone who could receive mail at a customer's
+-- domain could enter that customer's CRM.
+--
+-- token_hash holds SHA-256 of the token; the raw value exists only in the
+-- emailed link. A leaked database therefore yields no usable invitations.
+-- Single-use: status moves pending → accepted (or revoked) and never back.
+CREATE TABLE IF NOT EXISTS invitation (
+  id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id    TEXT        NOT NULL REFERENCES tenant(id),
+  email        TEXT        NOT NULL,
+  role         TEXT        NOT NULL CHECK (role IN ('admin','manager','member')),
+  token_hash   TEXT        NOT NULL,
+  status       TEXT        NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending','accepted','revoked')),
+  invited_by   TEXT        NOT NULL,
+  expires_at   TIMESTAMPTZ NOT NULL,
+  accepted_at  TIMESTAMPTZ,
+  accepted_sub TEXT,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- Lookup at accept time is by hash alone, so it must be unique and indexed.
+CREATE UNIQUE INDEX ASYNC IF NOT EXISTS idx_invitation_token  ON invitation(token_hash);
+CREATE        INDEX ASYNC IF NOT EXISTS idx_invitation_tenant ON invitation(tenant_id, status);
+CREATE        INDEX ASYNC IF NOT EXISTS idx_invitation_email  ON invitation(email, tenant_id);
+
 -- ── Phase 6C: A2A handoff log ──────────────────────────────────────────────────
 -- Records cross-department agent handoff events for audit and observability.
 CREATE TABLE IF NOT EXISTS a2a_handoff (

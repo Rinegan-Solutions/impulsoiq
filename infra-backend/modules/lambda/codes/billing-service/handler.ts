@@ -12,7 +12,13 @@ import Stripe from 'stripe';
 import { appSecret } from './secrets';
 
 const lambda = new LambdaClient({});
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
+  // DynamoDB rejects an undefined attribute value outright. Optional fields
+  // (starter, campaignId, agentRunId, ...) are routinely undefined, so without
+  // this every Put/Update carrying one fails at runtime with
+  // "Pass options.removeUndefinedValues=true".
+  marshallOptions: { removeUndefinedValues: true },
+});
 
 const CRM_WRITE = process.env.CRM_WRITE_SERVICE_ARN!;
 const CRM_READ = process.env.CRM_READ_SERVICE_ARN!;

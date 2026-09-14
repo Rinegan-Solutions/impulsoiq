@@ -1,5 +1,6 @@
 import { createContext, useContext } from 'react';
 import type { SessionUser } from './cognito';
+import { displayName, greetingName, personNameFromEmail } from '@/lib/name';
 
 /**
  * Shared authentication state.
@@ -46,13 +47,22 @@ export function roleOf(user: SessionUser): Role | null {
   return ROLE_PRECEDENCE.find((r) => user.groups.includes(r)) ?? null;
 }
 
+/** Full name for chrome and menus. Falls back to the address only as a last resort. */
 export function displayNameOf(user: SessionUser): string {
-  return user.name.trim() || user.email;
+  return displayName(user.name, user.email);
+}
+
+/**
+ * The single word to greet someone by, or null when no honest name exists.
+ * Never the raw email address — see lib/name.ts.
+ */
+export function greetingNameOf(user: SessionUser): string | null {
+  return greetingName(user.name, user.email);
 }
 
 export function initialsOf(user: SessionUser): string {
-  const source = user.name.trim() || user.email.split('@')[0] || '';
-  const parts = source.split(/[\s._-]+/).filter(Boolean);
-  const initials = `${parts[0]?.[0] ?? ''}${parts[1]?.[0] ?? ''}`.toUpperCase();
+  const source = user.name.trim() || personNameFromEmail(user.email) || user.email;
+  const parts = source.split(/[\s._-]+/).filter((t) => /\p{L}/u.test(t));
+  const initials = `${parts[0]?.[0] ?? ''}${parts[1]?.[0] ?? ''}`.toLocaleUpperCase();
   return initials || '?';
 }
