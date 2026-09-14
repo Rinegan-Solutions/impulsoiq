@@ -44,6 +44,68 @@ def _header(headers: dict[str, str], suffix: str) -> str:
     return (headers.get(key) or "").strip()
 
 
+def _session_identity(headers: dict[str, str], query: dict[str, str]) -> tuple[str, str]:
+    """
+    Tenant/user from custom headers (allowlisted), the same names as query
+    params (browser presign), or the Session-Id we minted as tenant__user__session.
+    Custom headers are stripped when the runtime allowlist is not applied.
+    Session-Id is a first-class AgentCore header and always reaches /ws.
+    """
+    tenant = (
+        _header(headers, "tenantid")
+        or query.get("x-amzn-bedrock-agentcore-runtime-custom-tenantid")
+        or ""
+    )
+    user = (
+        _header(headers, "userid")
+        or query.get("x-amzn-bedrock-agentcore-runtime-custom-userid")
+        or ""
+    )
+    session = (
+        headers.get("x-amzn-bedrock-agentcore-runtime-session-id")
+        or query.get("x-amzn-bedrock-agentcore-runtime-session-id")
+        or ""
+    )
+    if (not tenant or not user) and "__" in session:
+        parts = session.split("__")
+        if len(parts) >= 3:
+            tenant = tenant or parts[0]
+            user = user or parts[1]
+    return tenant, user
+
+
+def _event_payload(event: object) -> dict:
+    if isinstance(event, dict):
+        payload: object = event
+    else:
+        payload = None
+        for attr in ("to_dict", "as_dict", "model_dump"):
+            fn = getattr(event, attr, None)
+            if callable(fn):
+                payload = fn()
+                break
+        if not isinstance(payload, dict):
+            data = getattr(event, "__dict__", None)
+            payload = (
+                {k: v for k, v in data.items() if not str(k).startswith("_")}
+                if isinstance(data, dict)
+                else {"type": getattr(event, "type", "bidi_unknown"), "text": str(event)}
+            )
+    return json.loads(json.dumps(payload, default=str))
+
+
+async def _receive_json(websocket: WebSocket):
+    message = await websocket.receive()
+    if message.get("type") == "websocket.disconnect":
+        raise WebSocketDisconnect(code=int(message.get("code") or 1000))
+    raw = message.get("text")
+    if raw is None and message.get("bytes") is not None:
+        raw = bytes(message["bytes"]).decode("utf-8")
+    if not raw:
+        raise WebSocketDisconnect(code=1003)
+    return json.loads(raw)
+
+
 @app.get("/ping")
 def ping() -> dict[str, str]:
     return {"status": "healthy", "agent": AGENT_MODULE}
@@ -68,18 +130,40 @@ async def invocations(request: Request) -> JSONResponse:
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
+    # Accept before reading identity. Closing without accept fails the AgentCore
+    # client handshake and the browser only sees "Live voice dropped".
+    await websocket.accept()
     headers = {k.lower(): v for k, v in websocket.headers.items()}
-    tenant_id = _header(headers, "tenantid")
-    user_id = _header(headers, "userid")
+    query = {k.lower(): v for k, v in websocket.query_params.items()}
+    tenant_id, user_id = _session_identity(headers, query)
     if not tenant_id:
-        await websocket.close(code=1008, reason="missing workspace")
+        log.warning("bidi session missing workspace headers=%s query=%s", list(headers), list(query))
+        await websocket.send_json({
+            "type": "bidi_error",
+            "code": "missing_workspace",
+            "message": "Live voice could not bind to a workspace. Type instead.",
+        })
+        await websocket.close(code=1008)
         return
 
-    await websocket.accept()
-    bidi = _agent.make_bidi_agent(tenant_id, user_id)
+    try:
+        bidi = _agent.make_bidi_agent(tenant_id, user_id)
+    except Exception:
+        log.error("bidi agent init failed\n%s", traceback.format_exc())
+        await websocket.send_json({
+            "type": "bidi_error",
+            "code": "agent_init",
+            "message": "Live voice could not start. You can still type.",
+        })
+        await websocket.close(code=1011)
+        return
+
     log.info("bidi session start tenant=%s user=%s", tenant_id, user_id)
     try:
-        await bidi.run(inputs=[websocket.receive_json], outputs=[websocket.send_json])
+        await bidi.run(
+            inputs=[lambda: _receive_json(websocket)],
+            outputs=[lambda event: websocket.send_json(_event_payload(event))],
+        )
     except WebSocketDisconnect:
         log.info("bidi client disconnected tenant=%s", tenant_id)
     except Exception as exc:
@@ -87,6 +171,14 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             log.info("bidi session ended tenant=%s err=%s", tenant_id, exc)
         else:
             log.error("bidi session failed\n%s", traceback.format_exc())
+            try:
+                await websocket.send_json({
+                    "type": "bidi_error",
+                    "code": "session_failed",
+                    "message": "Live voice dropped. You can still type.",
+                })
+            except Exception:
+                pass
     finally:
         try:
             await bidi.stop()

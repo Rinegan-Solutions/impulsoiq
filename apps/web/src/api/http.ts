@@ -91,6 +91,12 @@ async function send(path: string, init: RequestInit): Promise<unknown> {
     } catch {
       /* not JSON — use the raw body */
     }
+    if (res.status === 504 || /timed out/i.test(detail)) {
+      throw new ApiError(
+        res.status,
+        'That request hit the API time limit. Try again — planning a run should only take a few seconds.',
+      );
+    }
     throw new ApiError(res.status, detail);
   }
   return text ? JSON.parse(text) : null;

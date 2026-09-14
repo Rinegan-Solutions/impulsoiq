@@ -46,6 +46,28 @@ NUM_SUBAGENTS         = 4
 SYNTHESIS_TOKENS      = 5_000
 TOTAL_ESTIMATED_TOKENS = NUM_SUBAGENTS * TOKENS_PER_SUBAGENT + SYNTHESIS_TOKENS
 
+
+def _agent_text(result: object) -> str:
+    """Plain markdown from a Strands AgentResult — not the Python repr."""
+    msg = getattr(result, "message", None)
+    if isinstance(msg, str) and msg.strip():
+        return msg.strip()
+    if isinstance(msg, dict):
+        content = msg.get("content")
+        if isinstance(content, list):
+            bits: list[str] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("text"):
+                    bits.append(str(block["text"]))
+                elif isinstance(block, str):
+                    bits.append(block)
+            if bits:
+                return "\n\n".join(bits).strip()
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    return str(result).strip()
+
+
 # ── Sub-agent strategy prompts ─────────────────────────────────────────────────
 
 STRATEGY_CONFIGS = {
@@ -210,9 +232,9 @@ Output a ranked list of 10-15 companies with:
   { rank, company, reasons: list, strategies: list, confidence }
 
 Then call write_research_report with ranked_companies populated (company or
-company_name, reasons, strategies, confidence). That tool also writes each
-company into the CRM Companies list.
-Never invent companies that were not in session memory.
+company_name, reasons, strategies, confidence). That tool writes each company
+into the CRM Companies list and looks up public officers as Contacts.
+Never invent companies or people that were not found.
 """.strip(),
         tools = [read_session_memory, write_research_report],
     )
@@ -241,7 +263,9 @@ Never invent companies that were not in session memory.
         "startedAt":   started_at,
         "completedAt": datetime.datetime.utcnow().isoformat() + "Z",
         "subAgentResults": sub_results,
-        "synthesis":   str(synthesis_result),
+        "synthesis":   _agent_text(synthesis_result),
         "crmAccounts": crm.get("accounts", []),
+        "crmContacts": crm.get("contacts", []),
         "crmSaved":    crm.get("savedCount", 0),
+        "crmContactCount": crm.get("contactCount", 0),
     }

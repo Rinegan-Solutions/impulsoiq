@@ -1,7 +1,7 @@
 /** PCM capture/playback for Strands BidiAgent (Nova Sonic) events. */
 
 export const BIDI_INPUT_RATE = 16000;
-export const BIDI_OUTPUT_RATE = 16000;
+export const BIDI_OUTPUT_RATE = 24000;
 
 export function pcm16ToBase64(samples: Int16Array): string {
   const bytes = new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength);
@@ -42,9 +42,15 @@ export class PcmPlayer {
 
   constructor(private readonly sampleRate: number) {}
 
-  async push(base64: string) {
+  async push(base64: string, sampleRate?: number) {
+    const rate = sampleRate && sampleRate > 0 ? sampleRate : this.sampleRate;
+    if (this.ctx && this.ctx.sampleRate !== rate) {
+      this.interrupt();
+      void this.ctx.close();
+      this.ctx = null;
+    }
     if (!this.ctx) {
-      this.ctx = new AudioContext({ sampleRate: this.sampleRate });
+      this.ctx = new AudioContext({ sampleRate: rate });
       this.next = this.ctx.currentTime;
     }
     if (this.ctx.state === 'suspended') await this.ctx.resume();
@@ -56,7 +62,7 @@ export class PcmPlayer {
     const float32 = new Float32Array(int16.length);
     for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
 
-    const buffer = this.ctx.createBuffer(1, float32.length, this.sampleRate);
+    const buffer = this.ctx.createBuffer(1, float32.length, this.ctx.sampleRate);
     buffer.getChannelData(0).set(float32);
     const now = this.ctx.currentTime;
     if (this.next < now) this.next = now;

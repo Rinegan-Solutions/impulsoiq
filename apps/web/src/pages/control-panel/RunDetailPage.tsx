@@ -137,11 +137,13 @@ interface SubAgentResult { strategy?: string; status?: string; result?: string }
 function DeepResearchOutput({
   output,
   crmAccounts,
+  crmContacts,
   savingCompanies,
   saveError,
 }: {
   output: Record<string, unknown>;
   crmAccounts: Array<{ id?: string; name?: string; rank?: number }>;
+  crmContacts: Array<{ id?: string; name?: string; title?: string; accountName?: string; accountId?: string }>;
   savingCompanies: boolean;
   saveError: string;
 }) {
@@ -191,6 +193,37 @@ function DeepResearchOutput({
                   >
                     <span className="min-w-0 truncate font-medium text-slate-800 dark:text-slate-200">
                       {typeof row.rank === 'number' ? `${row.rank}. ` : ''}{name}
+                    </span>
+                    <span className="flex-shrink-0 text-indigo-600 dark:text-indigo-400 font-semibold">
+                      Open
+                    </span>
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
+
+      {crmContacts.length > 0 && (
+        <section>
+          <h2 className="text-[0.78rem] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-600 mb-2">
+            Added to Contacts ({crmContacts.length})
+          </h2>
+          <ul className="rounded-2xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#0d1526] divide-y divide-slate-100 dark:divide-white/[0.05]">
+            {crmContacts.map((row, i) => {
+              const name = str(row.name) || `Contact ${i + 1}`;
+              const href = row.id ? `/contacts/${row.id}` : '/contacts';
+              const meta = [str(row.title), str(row.accountName)].filter(Boolean).join(' · ');
+              return (
+                <li key={row.id || `${name}-${i}`}>
+                  <Link
+                    to={href}
+                    className="flex items-center justify-between gap-3 px-4 py-2.5 text-[0.84rem] hover:bg-slate-50 dark:hover:bg-white/[0.03]"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate font-medium text-slate-800 dark:text-slate-200">{name}</span>
+                      {meta ? <span className="block truncate text-[0.74rem] text-slate-400">{meta}</span> : null}
                     </span>
                     <span className="flex-shrink-0 text-indigo-600 dark:text-indigo-400 font-semibold">
                       Open
@@ -276,6 +309,9 @@ export default function RunDetailPage() {
     ? (output?.crmAccounts as Array<{ id?: string; name?: string; rank?: number }>)
     : [];
   const crmAccounts = agentSaved.length > 0 ? agentSaved : importedAccounts;
+  const crmContacts = Array.isArray(output?.crmContacts)
+    ? (output?.crmContacts as Array<{ id?: string; name?: string; title?: string; accountName?: string; accountId?: string }>)
+    : [];
 
   useEffect(() => {
     if (!run || !output || !isDeepResearch || run.status !== 'completed') return;
@@ -363,6 +399,7 @@ export default function RunDetailPage() {
                 <DeepResearchOutput
                   output={output}
                   crmAccounts={crmAccounts}
+                  crmContacts={crmContacts}
                   savingCompanies={savingCompanies}
                   saveError={saveError}
                 />

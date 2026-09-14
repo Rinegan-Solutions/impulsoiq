@@ -15,7 +15,7 @@ import { cn } from '@/lib/utils';
 import { useAuth } from '@/lib/auth/useAuth';
 import { getCurrentToken } from '@/lib/auth/cognito';
 import { currentTenantSlug } from '@/lib/tenant';
-import { PcmPlayer, startMicStream, textInputEvent } from '@/lib/voiceBidi';
+import { BIDI_OUTPUT_RATE, PcmPlayer, startMicStream, textInputEvent } from '@/lib/voiceBidi';
 
 const VOICE_WS_URL = import.meta.env.VITE_VOICE_WS_URL ?? '';
 
@@ -26,14 +26,21 @@ interface BridgeMessage {
   code?: string;
   url?: string;
   sessionId?: string;
+  outputSampleRate?: number;
 }
 
 interface BidiMessage {
   type?: string;
   audio?: string;
   text?: string;
+  delta?: string | { text?: string };
+  transcript?: string;
+  current_transcript?: string;
+  is_final?: boolean;
   role?: string;
   sample_rate?: number;
+  message?: string;
+  code?: string;
 }
 
 interface Message {
@@ -57,6 +64,8 @@ export function VoiceInterface() {
   const sessionIdRef = useRef<string>(crypto.randomUUID());
   const inFlightRef = useRef<{ text: string; retried: boolean } | null>(null);
   const retryingRef = useRef(false);
+  const bidiRetriesRef = useRef(0);
+  const bidiReadyRef = useRef(false);
   const handleRef = useRef<(event: MessageEvent) => void>(() => undefined);
   const playerRef = useRef<PcmPlayer | null>(null);
   const micStopRef = useRef<(() => void) | null>(null);
@@ -99,6 +108,7 @@ export function VoiceInterface() {
     micStopRef.current = null;
     playerRef.current?.close();
     playerRef.current = null;
+    bidiReadyRef.current = false;
     bidiRef.current?.close();
     bidiRef.current = null;
     setListening(false);
@@ -126,7 +136,7 @@ export function VoiceInterface() {
 
       if (msg.type === 'processing' || msg.type === 'pong') return;
       if (msg.type === 'bidi_session' && msg.url) {
-        void attachBidi(msg.url);
+        void attachBidi(msg.url, msg.outputSampleRate);
         return;
       }
       if (msg.type === 'bidi_unavailable') {
@@ -222,22 +232,64 @@ export function VoiceInterface() {
 
   useEffect(() => () => teardown(), []);
 
-  async function attachBidi(url: string) {
+  function transcriptText(data: BidiMessage): string {
+    if (typeof data.current_transcript === 'string' && data.current_transcript.trim()) {
+      return data.current_transcript;
+    }
+    if (typeof data.transcript === 'string' && data.transcript.trim()) return data.transcript;
+    if (typeof data.text === 'string' && data.text.trim()) return data.text;
+    if (data.delta && typeof data.delta === 'object' && typeof data.delta.text === 'string') {
+      return data.delta.text;
+    }
+    if (typeof data.delta === 'string') return data.delta;
+    return '';
+  }
+
+  async function startMic(ws: WebSocket) {
+    try {
+      const mic = await startMicStream((payload) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+      });
+      micStopRef.current = mic.stop;
+      setListening(true);
+      setMicHint('Use headphones so the assistant does not hear itself.');
+    } catch {
+      setMicHint('Microphone permission was denied. You can still type.');
+    }
+  }
+
+  async function attachBidi(url: string, outputSampleRate?: number) {
     dropBidi();
-    const player = new PcmPlayer(16000);
+    const player = new PcmPlayer(outputSampleRate || BIDI_OUTPUT_RATE);
     playerRef.current = player;
     const ws = new WebSocket(url);
     bidiRef.current = ws;
+
     ws.onmessage = (ev) => {
       let data: BidiMessage;
       try { data = JSON.parse(String(ev.data)) as BidiMessage; } catch { return; }
-      if (data.type === 'bidi_audio_stream' && data.audio) {
-        void player.push(data.audio);
+
+      if (data.type === 'bidi_error') {
+        setMicHint(data.message || 'Live voice dropped. You can still type.');
+        setLive(false);
         return;
       }
-      if (data.type === 'bidi_transcript_stream' && data.text) {
+      if (data.type === 'bidi_connection_start' || data.type === 'bidi_connection_restart') {
+        bidiReadyRef.current = true;
+        bidiRetriesRef.current = 0;
+        setLive(true);
+        if (!micStopRef.current) void startMic(ws);
+        return;
+      }
+      if (data.type === 'bidi_audio_stream' && data.audio) {
+        void player.push(data.audio, data.sample_rate);
+        return;
+      }
+      if (data.type === 'bidi_transcript_stream' || data.type === 'bidi_transcript_complete') {
+        const text = transcriptText(data);
+        if (!text) return;
         const role = data.role === 'user' ? 'user' : 'assistant';
-        push(role, data.text);
+        push(role, text);
         if (role === 'assistant') setLoading(false);
         return;
       }
@@ -246,29 +298,33 @@ export function VoiceInterface() {
         setLoading(false);
       }
     };
-    ws.onopen = async () => {
+
+    ws.onopen = () => {
       setLive(true);
-      setMicHint('Use headphones so the assistant does not hear itself.');
-      try {
-        const mic = await startMicStream((payload) => {
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
-        });
-        micStopRef.current = mic.stop;
-        setListening(true);
-      } catch {
-        setMicHint('Microphone permission was denied. You can still type.');
-      }
+      setMicHint('Connecting to Nova Sonic…');
     };
+
     ws.onclose = () => {
-      if (bidiRef.current === ws) {
-        bidiRef.current = null;
-        setLive(false);
-        setListening(false);
+      if (bidiRef.current !== ws) return;
+      bidiRef.current = null;
+      const ready = bidiReadyRef.current;
+      dropBidi();
+      if (!ready && bidiRetriesRef.current < 1) {
+        bidiRetriesRef.current += 1;
+        setMicHint('Live voice is reconnecting…');
+        window.setTimeout(() => { void bootLive(); }, 800);
+        return;
+      }
+      if (!ready) {
+        setMicHint('Live voice dropped. You can still type.');
       }
     };
+
     ws.onerror = () => {
-      setMicHint('Live voice dropped. You can still type.');
-      setLive(false);
+      if (!bidiReadyRef.current) {
+        setMicHint('Live voice dropped. You can still type.');
+        setLive(false);
+      }
     };
   }
 
@@ -314,7 +370,7 @@ export function VoiceInterface() {
       return;
     }
     const bidi = bidiRef.current;
-    if (!bidi || bidi.readyState !== WebSocket.OPEN) {
+    if (!bidi || bidi.readyState !== WebSocket.OPEN || !bidiReadyRef.current) {
       setMicHint(live ? 'Reconnecting live voice…' : 'Live voice is starting. You can type in the meantime.');
       void bootLive();
       return;

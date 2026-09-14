@@ -391,16 +391,19 @@ export const handler: APIGatewayProxyHandler = async (event) => {
 
       if (operation === 'submit_goal') {
         await recordActivation(tenantId, 'goal_submitted', { goal, starter: body.starter });
+        // Questions are decided locally (missingQuestions). The clarification
+        // runtime is observational only — awaiting it blew past API Gateway's
+        // 29s limit ("Endpoint request timed out") before Home got a reply.
         const clarificationArn = await ssmValue('CLARIFICATION_ARN_SSM_PATH');
         if (clarificationArn && INVOKER_ARN) {
-          try {
-            await invokeJson(INVOKER_ARN, {
+          lambda.send(new InvokeCommand({
+            FunctionName: INVOKER_ARN,
+            InvocationType: 'Event',
+            Payload: Buffer.from(JSON.stringify({
               agentRuntimeArn: clarificationArn,
               payload: { tenantId, goal, starter: body.starter },
-            });
-          } catch (err) {
-            console.warn('clarification invoke failed', err);
-          }
+            })),
+          })).catch((err) => console.warn('clarification invoke failed', err));
         }
       }
 

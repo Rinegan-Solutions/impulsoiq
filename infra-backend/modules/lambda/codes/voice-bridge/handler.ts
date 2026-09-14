@@ -44,6 +44,7 @@ import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { Sha256 } from '@aws-crypto/sha256-js';
 import { HttpRequest } from '@smithy/protocol-http';
 import { SignatureV4 } from '@smithy/signature-v4';
+import { formatUrl } from '@aws-sdk/util-format-url';
 import jwt from 'jsonwebtoken';
 import jwksClient from 'jwks-rsa';
 
@@ -264,32 +265,29 @@ function extractReply(raw: string): string {
   return spokenText(parsed) ?? FALLBACK_REPLY;
 }
 
-function runtimeSessionId(userId: string, sessionId: string): string {
-  const raw = `voice-${userId}-${sessionId}`.replace(/[^A-Za-z0-9_-]/g, '');
+function runtimeSessionId(tenantId: string, userId: string, sessionId: string): string {
+  // AgentCore always forwards Session-Id to the container. Custom TenantId/UserId
+  // headers are stripped unless the runtime allowlist is applied, so identity
+  // also rides in this id: {tenant}__{user}__{session}.
+  const raw = `${tenantId}__${userId}__${sessionId}`.replace(/[^A-Za-z0-9_-]/g, '');
   if (raw.length >= 33) return raw.slice(0, 256);
   return (raw + 'x'.repeat(33)).slice(0, 256);
-}
-
-function queryString(query: Record<string, string | Array<string> | undefined> | undefined): string {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(query ?? {})) {
-    if (value === undefined) continue;
-    if (Array.isArray(value)) value.forEach((item) => params.append(key, item));
-    else params.append(key, value);
-  }
-  return params.toString();
 }
 
 /** Browser cannot SigV4 the AgentCore handshake, so this Lambda mints a 5-minute URL. */
 async function presignBidiUrl(identity: ConnectionIdentity, sessionId: string): Promise<string> {
   const agentRuntimeArn = await ssmParam('AMBIENT_AGENT_ARN_SSM_PATH');
   const hostname = `bedrock-agentcore.${REGION}.amazonaws.com`;
+  // ARN contains ":" and "/". Encode it as a single path segment, then tell
+  // SigV4 not to encode again (% → %25), which invalidates the signature and
+  // is the usual cause of a browser WebSocket that errors on open.
   const path = `/runtimes/${encodeURIComponent(agentRuntimeArn)}/ws`;
   const signer = new SignatureV4({
     credentials: defaultProvider(),
     region: REGION,
     service: 'bedrock-agentcore',
     sha256: Sha256,
+    uriEscapePath: false,
   });
   const request = new HttpRequest({
     method: 'GET',
@@ -298,14 +296,14 @@ async function presignBidiUrl(identity: ConnectionIdentity, sessionId: string): 
     path,
     query: {
       qualifier: 'DEFAULT',
-      'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': runtimeSessionId(identity.userId, sessionId),
+      'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': runtimeSessionId(identity.tenantId, identity.userId, sessionId),
       'X-Amzn-Bedrock-AgentCore-Runtime-Custom-TenantId': identity.tenantId,
       'X-Amzn-Bedrock-AgentCore-Runtime-Custom-UserId': identity.userId,
     },
     headers: { host: hostname },
   });
   const signed = await signer.presign(request, { expiresIn: 300 });
-  return `wss://${hostname}${path}?${queryString(signed.query as Record<string, string | Array<string> | undefined> | undefined)}`;
+  return formatUrl(signed).replace(/^https:/, 'wss:');
 }
 
 async function invokeAmbientAgent(identity: ConnectionIdentity, message: string, sessionId: string): Promise<string> {
@@ -326,7 +324,7 @@ async function invokeAmbientAgent(identity: ConnectionIdentity, message: string,
       qualifier: 'DEFAULT',
       // AgentCore scopes session memory by this id (min 33 chars). Prefixing the
       // user keeps one person's conversation out of another's.
-      runtimeSessionId: runtimeSessionId(identity.userId, sessionId),
+      runtimeSessionId: runtimeSessionId(identity.tenantId, identity.userId, sessionId),
       payload: Buffer.from(JSON.stringify({
         tenantId: identity.tenantId,
         userId:   identity.userId,
@@ -466,7 +464,7 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
         url,
         sessionId,
         inputSampleRate: 16000,
-        outputSampleRate: 16000,
+        outputSampleRate: 24000,
       });
     } catch (err) {
       console.warn('voice-bridge: bidi presign failed', { error: (err as Error).message, tenantId: who.tenantId });

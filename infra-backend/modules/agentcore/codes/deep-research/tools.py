@@ -16,7 +16,7 @@ import boto3
 from strands import tool
 
 from impulsoiq_secrets import app_secret
-from .research_search import licensed_search, search_companies
+from .research_search import licensed_search, search_companies, search_people
 
 from decimal import Decimal
 
@@ -369,7 +369,8 @@ def persist_research_accounts(
 
     Names come from search/synthesis — never invented here. Matching is by
     normalised name so a second Swarm does not duplicate Epic Systems.
-    People/contacts are not created: the swarm returns companies, not humans.
+    Public officers (CEO, founder, chair) are written as contacts when a
+    citable name exists. Emails are not invented.
     """
     ranked = [
         c for c in (_company_from_finding(item, i + 1) for i, item in enumerate(ranked_companies or []))
@@ -477,11 +478,102 @@ def persist_research_accounts(
         except Exception as exc:
             errors.append(f"{name}: {exc}")
 
+    contacts: list[dict] = []
+    contact_errors: list[str] = []
+    try:
+        people = persist_research_contacts(tenant_id, session_id, goal, saved)
+        contacts = people.get("contacts") or []
+        contact_errors = people.get("errors") or []
+    except Exception as exc:
+        contact_errors.append(str(exc))
+
     return {
         "savedCount": len(saved),
         "accounts": saved,
-        "errors": errors,
+        "contacts": contacts,
+        "contactCount": len(contacts),
+        "errors": errors + contact_errors,
     }
+
+
+def persist_research_contacts(
+    tenant_id: str,
+    session_id: str,
+    goal: str,
+    accounts: list[dict],
+) -> dict:
+    """Look up public people at each saved company and upsert CRM contacts."""
+    saved: list[dict] = []
+    errors: list[str] = []
+    for account in accounts:
+        account_id = str(account.get("id") or "")
+        company = str(account.get("name") or "").strip()
+        if not account_id or len(company) < 2:
+            continue
+        try:
+            people = search_people(company, 4)
+        except Exception as exc:
+            errors.append(f"{company} people: {exc}")
+            continue
+        for person in people:
+            first = str(person.get("firstName") or "").strip()
+            last = str(person.get("lastName") or "").strip()
+            if not first or not last:
+                continue
+            try:
+                search = _read("list_contacts", {"page": 1, "pageSize": 20, "search": last[:80]}, tenant_id)
+                result = search.get("result") if isinstance(search, dict) else {}
+                items = result.get("items") if isinstance(result, dict) else []
+                if not isinstance(items, list):
+                    items = []
+                existing = next(
+                    (
+                        row for row in items
+                        if isinstance(row, dict)
+                        and str(row.get("account_id") or row.get("accountId") or "") == account_id
+                        and _name_key(f"{row.get('first_name') or row.get('firstName') or ''} {row.get('last_name') or row.get('lastName') or ''}")
+                        == _name_key(f"{first} {last}")
+                    ),
+                    None,
+                )
+                payload = {
+                    "accountId": account_id,
+                    "firstName": first,
+                    "lastName": last,
+                    "title": person.get("title") or None,
+                    "stage": "Prospecting",
+                    "enrichmentJson": {
+                        "deepResearch": {
+                            "sessionId": session_id,
+                            "goal": goal,
+                            "company": company,
+                            "source": person.get("source") or "",
+                            "url": person.get("url") or "",
+                        }
+                    },
+                    "customFields": {"origin": "deep_research"},
+                }
+                if existing and existing.get("id"):
+                    payload["id"] = str(existing["id"])
+                    payload["email"] = existing.get("email")
+                    payload["phone"] = existing.get("phone") or existing.get("phoneNumber")
+                    payload["linkedinUrl"] = existing.get("linkedin_url") or existing.get("linkedinUrl")
+                written = _write("upsert_contact", payload, tenant_id)
+                new_id = str(written.get("id") or payload.get("id") or "")
+                if not new_id or written.get("ok") is False:
+                    errors.append(f"{first} {last}: {written.get('error') or 'write failed'}")
+                    continue
+                saved.append({
+                    "id": new_id,
+                    "name": f"{first} {last}",
+                    "title": person.get("title") or "",
+                    "accountId": account_id,
+                    "accountName": company,
+                    "created": not bool(existing),
+                })
+            except Exception as exc:
+                errors.append(f"{first} {last}: {exc}")
+    return {"contactCount": len(saved), "contacts": saved, "errors": errors}
 
 
 @tool
@@ -534,5 +626,7 @@ def write_research_report(
         "companyCount": len(companies),
         "crmSaved": crm.get("savedCount", 0),
         "accounts": crm.get("accounts", []),
+        "contacts": crm.get("contacts", []),
+        "contactCount": crm.get("contactCount", 0),
         "crmErrors": crm.get("errors") or [],
     }

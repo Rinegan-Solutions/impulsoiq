@@ -315,6 +315,8 @@ export default function HomePage() {
   // re-sent on every render.
   const savedCount = useRef(0);
   const saving = useRef(false);
+  const saveGen = useRef(0);
+  const openedThread = useRef<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const chatting = turns.length > 0;
@@ -345,6 +347,7 @@ export default function HomePage() {
       setStarter(thread.starter ?? undefined);
       setAnswers({});
       setThreadId(thread.id);
+      openedThread.current = thread.id;
       savedCount.current = thread.turns.length;
       setStick(true);
       // The address changes with the thread, so back returns to the previous one.
@@ -360,14 +363,22 @@ export default function HomePage() {
     }
   }, [setParams]);
 
-  // ?thread= on arrival — a linked or refreshed conversation.
-  const bootThread = useRef(params.get('thread'));
+  // Open from ?thread= when the address actually changes (history, refresh,
+  // back). A stale mount ref used to re-open the previous thread after New.
   useEffect(() => {
-    const id = bootThread.current;
-    if (id) void openThread(id);
-  }, [openThread]);
+    const id = params.get('thread');
+    if (!id) {
+      openedThread.current = null;
+      return;
+    }
+    if (openedThread.current === id) return;
+    openedThread.current = id;
+    void openThread(id);
+  }, [params, openThread]);
 
   function startNewThread() {
+    saveGen.current += 1;
+    openedThread.current = null;
     setTurns([]);
     setThreadGoal('');
     setAnswers({});
@@ -376,7 +387,7 @@ export default function HomePage() {
     setThreadId(null);
     savedCount.current = 0;
     setHistoryOpen(false);
-    setParams(new URLSearchParams(), { replace: false });
+    setParams(new URLSearchParams(), { replace: true });
   }
 
   const append = useCallback((...next: Turn[]) => {
@@ -404,6 +415,7 @@ export default function HomePage() {
 
     saving.current = true;
     const snapshot = turns.length;
+    const gen = saveGen.current;
     const firstUser = turns.find(t => t.role === 'user');
     void (async () => {
       try {
@@ -414,9 +426,11 @@ export default function HomePage() {
           ...(starter ? { starter } : {}),
           turns: turns.map(serialiseTurn),
         });
+        if (gen !== saveGen.current) return;
         savedCount.current = snapshot;
         if (!threadId && res.id) {
           setThreadId(res.id);
+          openedThread.current = res.id;
           setParams(prev => {
             const next = new URLSearchParams(prev);
             next.set('thread', res.id);

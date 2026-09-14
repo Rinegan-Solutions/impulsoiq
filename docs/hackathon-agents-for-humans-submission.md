@@ -201,14 +201,16 @@ Suggested title:
 
 Agents for Humans: ImpulsoIQ, Strands agents sales teams can watch and stop
 
+Full draft (paste into Builder.AWS): [builder-aws-agents-for-humans.md](builder-aws-agents-for-humans.md)
+
 Outline:
 
-1. AI SDR tools that cannot be killed, consented, or called.
-2. Why we used Strands plus AgentCore Runtime, Memory, and Gateway (MCP tools) instead of one Bedrock invoke.
-3. A graph plus Step Functions so CALL-E can be async.
-4. One CRM writer on Aurora DSQL, events in DynamoDB.
-5. The Agent Control Panel as the place you trust the system.
-6. What we left off: Amazon Connect as inbound plumbing, same agents later.
+1. Open with the demo we kept seeing (chat that dumps email, no kill, no real call) and why Article 50 / TCPA made gates product work, not a slide.
+2. One Bedrock invoke vs a loop: one ARM64 AgentCore runtime per specialist, Gateway MCP onto the same Lambdas as the UI, Memory for clarification, model as an env var because eu-west-2 profiles were missing, swarm only for deep research after a token approval.
+3. Campaigns in Step Functions: `waitForTaskToken` for approvals, `StopExecution` for pause/kill, CALL-E `run_call` returns while ringing, webhook to EventBridge, disclosure timestamps on `call_result`, stub voice off in prod. Connect later for inbound, not a second brain.
+4. Aurora DSQL with one CRM Write Lambda (OCC, no triggers). DynamoDB for events, metering, forecast. Cognito authorizer wants the raw ID token (Bearer is 401). Terraform in eu-west-2.
+5. Home to Approvals to Runs as a real execution. No invented contacts, no fake enrichment, no reply-rate charts the schema cannot compute. Control Panel watches the same operations as the UI.
+6. Support queue, OpenSearch, vectors, LinkedIn, open rates: not this demo. Three support runtimes exist and stay dark. Close on Stop meaning stop, and default approval on the first emails.
 
 Published URL: TODO (paste the Builder.AWS permalink after it is live)
 

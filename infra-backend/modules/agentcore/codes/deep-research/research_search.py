@@ -432,3 +432,196 @@ def search_companies(query: str, strategy: str, limit: int) -> tuple[list[dict[s
         take("nova_grounding", nova_grounded_search(query, strategy, limit))
         merged = _dedupe(collected, limit)
     return merged, tried
+
+
+_WIKIDATA_ROLES = {
+    "P169": "Chief Executive Officer",
+    "P112": "Founder",
+    "P488": "Chairperson",
+    "P1037": "Director",
+}
+
+
+def _split_person(full: str) -> tuple[str, str] | None:
+    cleaned = re.sub(r"\s+", " ", (full or "").strip())
+    cleaned = re.sub(r"\s*\([^)]*\)\s*", " ", cleaned).strip(" ,.")
+    if any(ch.isdigit() for ch in cleaned):
+        return None
+    parts = [p for p in cleaned.split(" ") if p and p.lower() not in {"inc", "inc.", "ltd", "llc", "the", "plc"}]
+    if len(parts) < 2 or len(cleaned) < 5 or len(cleaned) > 80:
+        return None
+    if not parts[0][0].isupper() or not parts[-1][0].isupper():
+        return None
+    return parts[0], " ".join(parts[1:])
+
+
+def _person_row(name: str, title: str, source: str, url: str = "") -> dict[str, Any] | None:
+    split = _split_person(name)
+    if not split:
+        return None
+    first, last = split
+    return {
+        "name": f"{first} {last}",
+        "firstName": first,
+        "lastName": last,
+        "title": (title or "").strip()[:120],
+        "source": source,
+        "url": url,
+    }
+
+
+def _wikidata_qid(company: str) -> str:
+    q = (company or "").strip()[:120]
+    if not q:
+        return ""
+    try:
+        resp = httpx.get(
+            "https://www.wikidata.org/w/api.php",
+            params={
+                "action": "wbsearchentities",
+                "search": q,
+                "language": "en",
+                "type": "item",
+                "limit": 5,
+                "format": "json",
+            },
+            headers=HEADERS,
+            timeout=12,
+        )
+        if resp.status_code != 200:
+            return ""
+        hits = resp.json().get("search") or []
+    except Exception as exc:  # noqa: BLE001
+        log.warning("wikidata qid failed: %s", exc)
+        return ""
+    want = re.sub(r"[^a-z0-9]+", "", q.lower())
+    for hit in hits:
+        if not isinstance(hit, dict):
+            continue
+        label = str(hit.get("label") or "")
+        key = re.sub(r"[^a-z0-9]+", "", label.lower())
+        if key == want or want in key or key in want:
+            return str(hit.get("id") or "")
+    if hits and isinstance(hits[0], dict):
+        return str(hits[0].get("id") or "")
+    return ""
+
+
+def wikidata_people(company: str, limit: int = 6) -> list[dict[str, Any]]:
+    qid = _wikidata_qid(company)
+    if not qid:
+        return []
+    props = " ".join(f"wdt:{p}" for p in _WIKIDATA_ROLES)
+    sparql = f"""
+    SELECT DISTINCT ?personLabel ?prop WHERE {{
+      wd:{qid} ?prop ?person .
+      VALUES ?prop {{ {props} }}
+      ?person wdt:P31 wd:Q5 .
+      SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
+    }} LIMIT {max(1, min(limit, 8))}
+    """
+    try:
+        resp = httpx.get(
+            "https://query.wikidata.org/sparql",
+            params={"query": sparql, "format": "json"},
+            headers={**HEADERS, "Accept": "application/sparql-results+json"},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            log.warning("wikidata people http %s", resp.status_code)
+            return []
+        bindings = ((resp.json().get("results") or {}).get("bindings") or [])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("wikidata people failed: %s", exc)
+        return []
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for bind in bindings:
+        if not isinstance(bind, dict):
+            continue
+        name = str(((bind.get("personLabel") or {}).get("value") or "")).strip()
+        prop = str(((bind.get("prop") or {}).get("value") or ""))
+        code = prop.rsplit("/", 1)[-1]
+        title = _WIKIDATA_ROLES.get(code, "Executive")
+        row = _person_row(name, title, "wikidata", f"https://www.wikidata.org/wiki/{qid}")
+        if not row:
+            continue
+        key = re.sub(r"[^a-z0-9]+", "", row["name"].lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+    return rows
+
+
+def nova_people(company: str, limit: int = 4) -> list[dict[str, Any]]:
+    region = os.environ.get("RESEARCH_GROUNDING_REGION", "us-east-1")
+    model_id = os.environ.get("RESEARCH_GROUNDING_MODEL", "us.amazon.nova-2-lite-v1:0")
+    prompt = (
+        f"Name up to {limit} real people who lead or founded {company} "
+        "(CEO, founder, president, CRO, VP sales). "
+        "Use web grounding. Only people you can cite. Never invent names or emails. "
+        "JSON array only:\n"
+        '[{"name":"First Last","title":"...","url":"https://..."}]'
+    )
+    try:
+        import boto3
+        from botocore.config import Config
+
+        bedrock = boto3.client(
+            "bedrock-runtime",
+            region_name=region,
+            config=Config(read_timeout=45, retries={"max_attempts": 1}),
+        )
+        resp = bedrock.converse(
+            modelId=model_id,
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            toolConfig={"tools": [{"systemTool": {"name": "nova_grounding"}}]},
+            inferenceConfig={"maxTokens": 1200},
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("nova people failed for %s: %s", company, exc)
+        return []
+
+    text = ""
+    for block in ((resp.get("output") or {}).get("message") or {}).get("content") or []:
+        if isinstance(block, dict) and block.get("text"):
+            text += str(block["text"])
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in _json_array(text):
+        if not isinstance(item, dict):
+            continue
+        row = _person_row(
+            str(item.get("name") or ""),
+            str(item.get("title") or "Executive"),
+            "nova_grounding",
+            str(item.get("url") or ""),
+        )
+        if not row:
+            continue
+        key = re.sub(r"[^a-z0-9]+", "", row["name"].lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def search_people(company: str, limit: int = 4) -> list[dict[str, Any]]:
+    """Public officers for a named company. Empty is allowed — never invent people."""
+    cap = max(1, min(int(limit or 4), 6))
+    collected = wikidata_people(company, cap)
+    if len(collected) < 2:
+        for row in nova_people(company, cap):
+            key = re.sub(r"[^a-z0-9]+", "", row["name"].lower())
+            if any(re.sub(r"[^a-z0-9]+", "", r["name"].lower()) == key for r in collected):
+                continue
+            collected.append(row)
+            if len(collected) >= cap:
+                break
+    return collected[:cap]
+

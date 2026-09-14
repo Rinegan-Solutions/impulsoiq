@@ -1,5 +1,6 @@
 import { accountsApi } from '@/api/client';
 import type { Account } from '@/api/schemas';
+import { prepareMarkdown } from '@/lib/prepareMarkdown';
 
 const SKIP_NAME = /^(status|findings|next steps|recommendation|methodology|full ranked|would you like)/i;
 
@@ -7,7 +8,7 @@ const SKIP_NAME = /^(status|findings|next steps|recommendation|methodology|full 
 export function parseResearchCompanyNames(markdown: string): string[] {
   const found: string[] = [];
   const seen = new Set<string>();
-  for (const raw of markdown.split('\n')) {
+  for (const raw of prepareMarkdown(markdown).split('\n')) {
     const line = raw.trim();
     if (!/^(?:\d+\.|[-*])\s+/.test(line)) continue;
     const rest = line.replace(/^(?:\d+\.|[-*])\s+/, '');
