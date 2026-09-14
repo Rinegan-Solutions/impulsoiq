@@ -12,7 +12,7 @@ import { cn } from '@/lib/utils';
 import { useAuth, roleOf, ROLE_LABEL, initialsOf, displayNameOf, type Role } from '@/lib/auth/useAuth';
 import { updateDisplayName, authErrorMessage } from '@/lib/auth/cognito';
 import { useTenant } from '@/lib/useTenant';
-import { workspaceHost } from '@/lib/tenant';
+import { companyDisplayName, workspaceHost } from '@/lib/tenant';
 import { tenantApi, billingApi, invitationsApi, INVITABLE_ROLES } from '@/api/client';
 import type { Invitation, InvitationRole } from '@/api/schemas';
 import { ApiError } from '@/api/http';
@@ -226,7 +226,7 @@ export default function SettingsPage() {
               <>
                 <Card title="Workspace">
                   <Field label="Workspace name">
-                    <p className={READONLY_CLS}>{tenant?.name ?? user.tenantId}</p>
+                    <p className={READONLY_CLS}>{companyDisplayName(tenant?.name, user.tenantId)}</p>
                   </Field>
                   <Field label="Workspace ID" hint="Used in API calls and subdomain routing">
                     <CopyValue value={user.tenantId} />
@@ -253,7 +253,7 @@ export default function SettingsPage() {
                   </Field>
                 </Card>
 
-                <TeamCard callerRole={role} workspaceName={tenant?.name ?? ''} />
+                <TeamCard callerRole={role} workspaceName={companyDisplayName(tenant?.name, user.tenantId)} />
               </>
             )}
 

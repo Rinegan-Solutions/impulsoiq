@@ -23,7 +23,7 @@ import { cn } from '@/lib/utils';
 import { useAuth, roleOf, ROLE_LABEL, initialsOf, displayNameOf } from '@/lib/auth/useAuth';
 import type { SessionUser } from '@/lib/auth/cognito';
 import { useTenant } from '@/lib/useTenant';
-import { workspaceHost } from '@/lib/tenant';
+import { companyDisplayName, workspaceHost } from '@/lib/tenant';
 import { CommandPalette } from '@/components/app/CommandPalette';
 import { NotificationsBell } from '@/components/app/NotificationsBell';
 import { childActive, modeForPath, modesFor } from '@/lib/nav';
@@ -55,7 +55,7 @@ function Wordmark({ onNavigate }: { onNavigate?: () => void }) {
   const { user } = useAuth();
   const tenant = useTenant(user?.tenantId);
   if (!user) return null;
-  const company = tenant?.name || user.tenantId;
+  const company = companyDisplayName(tenant?.name, user.tenantId);
 
   return (
     <Link
@@ -81,6 +81,7 @@ function Wordmark({ onNavigate }: { onNavigate?: () => void }) {
 
 function AvatarDropdown() {
   const { user } = useAuth();
+  const tenant = useTenant(user?.tenantId);
   const signOutAndLeave = useSignOutAndLeave();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -123,7 +124,7 @@ function AvatarDropdown() {
             <div className="px-4 py-2.5 border-b border-slate-100 dark:border-white/[0.06] mb-1">
               <p className="text-[0.82rem] font-bold text-slate-900 dark:text-white truncate">{displayNameOf(user)}</p>
               <p className="text-[0.72rem] text-slate-500 dark:text-slate-400 truncate">{user.email}</p>
-              <p className="text-[0.72rem] text-slate-400 dark:text-slate-600">{roleLabel(user)} · {user.tenantId}</p>
+              <p className="text-[0.72rem] text-slate-400 dark:text-slate-600">{roleLabel(user)} · {companyDisplayName(tenant?.name, user.tenantId)}</p>
             </div>
 
             <Link
@@ -167,7 +168,7 @@ function ModeBar({ onMenuClick }: { onMenuClick: () => void }) {
   // are equal 1fr tracks and `min-w-0` lets them shrink instead of shoving the
   // centre off-axis when a long workspace name sits under the wordmark.
   return (
-    <header className="h-[64px] grid grid-cols-[1fr_auto_1fr] items-center gap-3 sm:gap-5 px-4 sm:px-6 border-b border-slate-200 dark:border-white/[0.06] bg-white dark:bg-[#020617] flex-shrink-0 z-20">
+    <header className="h-[68px] grid grid-cols-[1fr_auto_1fr] items-center gap-3 sm:gap-5 px-4 sm:px-6 bg-slate-50/75 dark:bg-[#020617]/75 backdrop-blur-xl flex-shrink-0 z-20">
       <div className="flex items-center gap-3 min-w-0">
         <button
           onClick={onMenuClick}
@@ -179,7 +180,10 @@ function ModeBar({ onMenuClick }: { onMenuClick: () => void }) {
         <Wordmark />
       </div>
 
-      <nav className="hidden lg:flex items-center gap-1 justify-self-center" aria-label="Main">
+      <nav
+        className="hidden lg:flex items-center gap-0.5 justify-self-center p-1 rounded-full bg-white/50 dark:bg-white/[0.07] backdrop-blur-xl border border-white/70 dark:border-white/15 shadow-[0_8px_28px_-12px_rgba(15,23,42,0.22),inset_0_1px_0_rgba(255,255,255,0.85)] dark:shadow-[0_8px_28px_-12px_rgba(0,0,0,0.55),inset_0_1px_0_rgba(255,255,255,0.12)] [@media(prefers-reduced-transparency:reduce)]:bg-white [@media(prefers-reduced-transparency:reduce)]:backdrop-blur-none dark:[@media(prefers-reduced-transparency:reduce)]:bg-[#0d1526]"
+        aria-label="Main"
+      >
         {modes.map((mode) => {
           const Icon = mode.icon;
           const isActive = activeMode?.id === mode.id;
@@ -189,10 +193,10 @@ function ModeBar({ onMenuClick }: { onMenuClick: () => void }) {
               to={mode.href}
               aria-current={isActive ? 'page' : undefined}
               className={cn(
-                'flex items-center gap-2 px-3 py-2 rounded-xl text-[0.84rem] font-semibold transition-colors',
+                'flex items-center gap-2 px-3.5 py-1.5 rounded-full text-[0.84rem] font-semibold transition-colors',
                 isActive
-                  ? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300'
-                  : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-white/[0.05] hover:text-slate-900 dark:hover:text-white',
+                  ? 'bg-white text-indigo-700 shadow-[0_1px_4px_rgba(15,23,42,0.08)] dark:bg-white/15 dark:text-indigo-200 dark:shadow-none'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white',
               )}
             >
               <Icon size={16} />
@@ -222,7 +226,7 @@ function ModeTabs() {
   const mode = modeForPath(location.pathname, modes);
   if (!mode?.children?.length) return null;
   return (
-    <div className="h-11 flex items-center gap-1 px-4 sm:px-6 border-b border-slate-200 dark:border-white/[0.06] bg-white dark:bg-[#020617] overflow-x-auto flex-shrink-0">
+    <div className="h-11 flex items-center gap-1 px-4 sm:px-6 bg-slate-50/75 dark:bg-[#020617]/75 overflow-x-auto flex-shrink-0">
       {mode.children.map((tab) => (
         <NavLink
           key={tab.href}

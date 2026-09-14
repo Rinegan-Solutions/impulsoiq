@@ -85,3 +85,19 @@ export function workspaceHost(slug: string): string {
   // The build always injects VITE_WEB_ZONE; the fallback matches SignUp's.
   return `${slug}.${ZONE || 'impulsoiq.rinegansolutions.com'}`;
 }
+
+/**
+ * Company name for chrome: the tenant's stored name, else the slug with hyphens
+ * as spaces. Title-cased when the source is all-lowercase (typical of slugs).
+ * A name that already carries a capital is left as stored (IBM, Rinegan).
+ */
+export function companyDisplayName(name: string | null | undefined, slug: string): string {
+  const raw = (name ?? '').trim();
+  const source = raw || slug.replace(/-/g, ' ');
+  if (!source) return '';
+  if (/[A-Z]/.test(source)) return source;
+  return source.replace(
+    /(^|[\s-])(\p{L})/gu,
+    (_m, sep: string, ch: string) => sep + ch.toLocaleUpperCase(),
+  );
+}
