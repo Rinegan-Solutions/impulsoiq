@@ -2,8 +2,9 @@
  * Voice Bridge Lambda — Phase 4A.
  *
  * WebSocket API Gateway handler between the browser and the ambient-interface
- * agent. TEXT MODE today: the browser sends {type:"text", message, sessionId}
- * and receives {type:"processing"} then {type:"response"} or {type:"error"}.
+ * agent. Speech-to-speech: the browser sends {type:"start"} and receives a
+ * SigV4-presigned AgentCore /ws URL (BidiAgent + Nova Sonic). Typed fallback
+ * still uses {type:"text"} → InvokeAgentRuntime HTTP.
  *
  * SECURITY MODEL
  * This handler used to store connections without authenticating them and take
@@ -23,7 +24,9 @@
  *   $default   The workspace and user come ONLY from the identity stored on the
  *              connection record at $connect. Nothing tenant-shaped in a message
  *              is read. A connection whose token has expired is told to
- *              reconnect (code "session_expired") and closed.
+ *              reconnect (code "session_expired") and closed. The presigned
+ *              AgentCore URL also carries that same tenant/user as custom query
+ *              params; the container binds tools to that workspace.
  */
 import type { APIGatewayProxyWebsocketHandlerV2 } from 'aws-lambda';
 import {
@@ -35,7 +38,12 @@ import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-r
 import { BedrockAgentCoreClient, InvokeAgentRuntimeCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, DeleteCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+import { defaultProvider } from '@aws-sdk/credential-provider-node';
+import { Sha256 } from '@aws-crypto/sha256-js';
+import { HttpRequest } from '@smithy/protocol-http';
+import { SignatureV4 } from '@smithy/signature-v4';
 import jwt from 'jsonwebtoken';
 import jwksClient from 'jwks-rsa';
 
@@ -51,6 +59,7 @@ const dynamo    = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGIO
 const bedrock   = new BedrockRuntimeClient({ region: REGION });
 const agentcore = new BedrockAgentCoreClient({ region: REGION });
 const ssm       = new SSMClient({ region: REGION });
+const lambda    = new LambdaClient({ region: REGION });
 
 const CONNECTIONS_TABLE = process.env.DYNAMODB_TABLE!;
 
@@ -69,7 +78,7 @@ const SLUG       = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
 const SESSION_ID = /^[A-Za-z0-9-]{16,56}$/;
 
 interface WsMessage {
-  type:       'text' | 'audio' | 'ping';
+  type:       'text' | 'audio' | 'ping' | 'start';
   message?:   string;
   sessionId?: string;
 }
@@ -211,16 +220,92 @@ async function readBody(body: unknown): Promise<string> {
   return String(body);
 }
 
+function spokenText(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const t = value.trim();
+    return t || null;
+  }
+  if (!value || typeof value !== 'object') return null;
+  const obj = value as Record<string, unknown>;
+  if (obj.ok === false) {
+    throw new Error(typeof obj.error === 'string' ? obj.error : 'agent returned an error');
+  }
+  for (const key of ['response', 'text', 'message', 'output', 'result']) {
+    const inner = obj[key];
+    if (typeof inner === 'string' && inner.trim()) return inner.trim();
+    if (inner && typeof inner === 'object' && inner !== value) {
+      const nested = spokenText(inner);
+      if (nested) return nested;
+    }
+  }
+  if (Array.isArray(obj.content)) {
+    const bits = obj.content
+      .map((c) => (c && typeof c === 'object' && typeof (c as { text?: unknown }).text === 'string'
+        ? (c as { text: string }).text
+        : ''))
+      .filter(Boolean);
+    if (bits.length) return bits.join(' ').trim();
+  }
+  return null;
+}
+
 function extractReply(raw: string): string {
   let parsed: unknown = raw;
   try { parsed = raw ? JSON.parse(raw) : null; } catch { /* plain-text reply */ }
-  if (typeof parsed === 'string') return parsed.trim() || FALLBACK_REPLY;
+  // AgentCore sometimes wraps the agent JSON as a string field.
+  if (typeof parsed === 'string') {
+    const inner = parsed.trim();
+    try {
+      parsed = JSON.parse(inner);
+    } catch {
+      return inner || FALLBACK_REPLY;
+    }
+  }
+  return spokenText(parsed) ?? FALLBACK_REPLY;
+}
 
-  const obj = parsed as { ok?: unknown; response?: unknown; result?: { response?: unknown }; error?: unknown } | null;
-  if (obj && typeof obj.response === 'string') return obj.response;
-  if (obj?.result && typeof obj.result.response === 'string') return obj.result.response;
-  if (obj && obj.ok === false) throw new Error(typeof obj.error === 'string' ? obj.error : 'agent returned an error');
-  return FALLBACK_REPLY;
+function runtimeSessionId(userId: string, sessionId: string): string {
+  const raw = `voice-${userId}-${sessionId}`.replace(/[^A-Za-z0-9_-]/g, '');
+  if (raw.length >= 33) return raw.slice(0, 256);
+  return (raw + 'x'.repeat(33)).slice(0, 256);
+}
+
+function queryString(query: Record<string, string | Array<string> | undefined> | undefined): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query ?? {})) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) value.forEach((item) => params.append(key, item));
+    else params.append(key, value);
+  }
+  return params.toString();
+}
+
+/** Browser cannot SigV4 the AgentCore handshake, so this Lambda mints a 5-minute URL. */
+async function presignBidiUrl(identity: ConnectionIdentity, sessionId: string): Promise<string> {
+  const agentRuntimeArn = await ssmParam('AMBIENT_AGENT_ARN_SSM_PATH');
+  const hostname = `bedrock-agentcore.${REGION}.amazonaws.com`;
+  const path = `/runtimes/${encodeURIComponent(agentRuntimeArn)}/ws`;
+  const signer = new SignatureV4({
+    credentials: defaultProvider(),
+    region: REGION,
+    service: 'bedrock-agentcore',
+    sha256: Sha256,
+  });
+  const request = new HttpRequest({
+    method: 'GET',
+    protocol: 'https:',
+    hostname,
+    path,
+    query: {
+      qualifier: 'DEFAULT',
+      'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': runtimeSessionId(identity.userId, sessionId),
+      'X-Amzn-Bedrock-AgentCore-Runtime-Custom-TenantId': identity.tenantId,
+      'X-Amzn-Bedrock-AgentCore-Runtime-Custom-UserId': identity.userId,
+    },
+    headers: { host: hostname },
+  });
+  const signed = await signer.presign(request, { expiresIn: 300 });
+  return `wss://${hostname}${path}?${queryString(signed.query as Record<string, string | Array<string> | undefined> | undefined)}`;
 }
 
 async function invokeAmbientAgent(identity: ConnectionIdentity, message: string, sessionId: string): Promise<string> {
@@ -241,7 +326,7 @@ async function invokeAmbientAgent(identity: ConnectionIdentity, message: string,
       qualifier: 'DEFAULT',
       // AgentCore scopes session memory by this id (min 33 chars). Prefixing the
       // user keeps one person's conversation out of another's.
-      runtimeSessionId: `voice-${identity.userId}-${sessionId}`,
+      runtimeSessionId: runtimeSessionId(identity.userId, sessionId),
       payload: Buffer.from(JSON.stringify({
         tenantId: identity.tenantId,
         userId:   identity.userId,
@@ -264,7 +349,39 @@ async function invokeAmbientAgent(identity: ConnectionIdentity, message: string,
 
 // ── Handler ──────────────────────────────────────────────────────────────────
 
+interface AsyncWork {
+  asyncWork: true;
+  connectionId: string;
+  endpoint: string;
+  identity: ConnectionIdentity;
+  message: string;
+  sessionId: string;
+}
+
+function isAsyncWork(event: unknown): event is AsyncWork {
+  return Boolean(event && typeof event === 'object' && (event as AsyncWork).asyncWork === true);
+}
+
+async function handleAsyncWork(work: AsyncWork): Promise<{ statusCode: number; body: string }> {
+  try {
+    const text = await invokeAmbientAgent(work.identity, work.message, work.sessionId);
+    await sendToClient(work.endpoint, work.connectionId, {
+      type: 'response', text, sessionId: work.sessionId, inputModality: 'voice',
+    });
+  } catch (err) {
+    console.error('voice-bridge: agent invocation failed', {
+      error: (err as Error).message, connectionId: work.connectionId, tenantId: work.identity.tenantId,
+    });
+    await sendToClient(work.endpoint, work.connectionId, {
+      type: 'error', error: 'The assistant is unavailable. Please try again.', sessionId: work.sessionId,
+    }).catch(() => undefined);
+  }
+  return { statusCode: 200, body: 'OK' };
+}
+
 export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
+  if (isAsyncWork(event as unknown)) return handleAsyncWork(event as unknown as AsyncWork);
+
   const { connectionId, routeKey, domainName, stage } = event.requestContext;
   const endpoint = `https://${domainName}/${stage}`;
   const key      = { pk: `connection#${connectionId}`, sk: 'meta' };
@@ -337,6 +454,31 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
     return { statusCode: 200, body: 'pong' };
   }
 
+  const sessionId = msg.sessionId && SESSION_ID.test(msg.sessionId)
+    ? msg.sessionId
+    : connectionId.replace(/[^A-Za-z0-9-]/g, '');
+
+  if (msg.type === 'start') {
+    try {
+      const url = await presignBidiUrl(who, sessionId);
+      await sendToClient(endpoint, connectionId, {
+        type: 'bidi_session',
+        url,
+        sessionId,
+        inputSampleRate: 16000,
+        outputSampleRate: 16000,
+      });
+    } catch (err) {
+      console.warn('voice-bridge: bidi presign failed', { error: (err as Error).message, tenantId: who.tenantId });
+      await sendToClient(endpoint, connectionId, {
+        type: 'bidi_unavailable',
+        error: 'Live voice is unavailable. You can still type.',
+        sessionId,
+      });
+    }
+    return { statusCode: 200, body: 'bidi' };
+  }
+
   const message = typeof msg.message === 'string' ? msg.message.trim() : '';
   if (msg.type !== 'text' || !message) {
     await sendToClient(endpoint, connectionId, { type: 'error', error: 'A text message is required.' });
@@ -347,24 +489,30 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
     return { statusCode: 400, body: 'Message too long' };
   }
 
-  const sessionId = msg.sessionId && SESSION_ID.test(msg.sessionId)
-    ? msg.sessionId
-    : connectionId.replace(/[^A-Za-z0-9-]/g, '');
-
-  // Acknowledge immediately — provides conversational responsiveness
+  // Acknowledge immediately, then finish the agent call on a second invocation.
+  // WebSocket integrations time out at 29s; a tool-using agent routinely takes longer.
   await sendToClient(endpoint, connectionId, { type: 'processing', sessionId });
 
-  try {
-    const text = await invokeAmbientAgent(who, message, sessionId);
-    await sendToClient(endpoint, connectionId, { type: 'response', text, sessionId, inputModality: 'voice' });
-  } catch (err) {
-    console.error('voice-bridge: agent invocation failed', {
-      error: (err as Error).message, connectionId, tenantId: who.tenantId,
-    });
+  const functionName = process.env.AWS_LAMBDA_FUNCTION_NAME;
+  if (!functionName) {
     await sendToClient(endpoint, connectionId, {
-      type: 'error', error: 'The assistant is unavailable. Please try again.', sessionId,
+      type: 'error', error: 'The assistant is not configured.', sessionId,
     });
+    return { statusCode: 500, body: 'Not configured' };
   }
 
-  return { statusCode: 200, body: 'OK' };
+  await lambda.send(new InvokeCommand({
+    FunctionName: functionName,
+    InvocationType: 'Event',
+    Payload: Buffer.from(JSON.stringify({
+      asyncWork: true,
+      connectionId,
+      endpoint,
+      identity: who,
+      message,
+      sessionId,
+    } satisfies AsyncWork)),
+  }));
+
+  return { statusCode: 200, body: 'Accepted' };
 };

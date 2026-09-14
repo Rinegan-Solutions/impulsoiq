@@ -13,6 +13,7 @@ import DashboardPage from './pages/DashboardPage';
 import ContactsPage from './pages/crm/ContactsPage';
 import CampaignsPage from './pages/campaigns/CampaignsPage';
 import AgentControlPanel from './pages/control-panel/AgentControlPanel';
+import RunDetailPage from './pages/control-panel/RunDetailPage';
 import DealsPage from './pages/DealsPage';
 import AccountsPage from './pages/AccountsPage';
 import AnalyticsPage from './pages/AnalyticsPage';
@@ -114,6 +115,8 @@ export default function App() {
         <Route path="/campaigns"       element={<CampaignsPage />} />
         <Route path="/sequences"       element={<SequencesPage />} />
         <Route path="/control-panel"   element={<AgentControlPanel />} />
+        {/* One run, in full: the address notifications and history links point at. */}
+        <Route path="/control-panel/:runId" element={<RunDetailPage />} />
         <Route path="/approvals"       element={<ApprovalsPage />} />
         <Route path="/usage"           element={<UsagePage />} />
         <Route path="/analytics"       element={<AnalyticsPage />} />

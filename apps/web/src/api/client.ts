@@ -28,6 +28,8 @@ import {
   TemplateActivationSchema,
   OrgCheckSchema,
   InvitationSchema,
+  ThreadSchema,
+  ThreadSummarySchema,
   SequenceSchema,
   EnrichmentRecordSchema,
   PaginatedSchema,
@@ -498,6 +500,35 @@ export const intentApi = {
       method: 'POST',
       body: JSON.stringify({ operation: 'record_event', eventType, data }),
     }),
+};
+
+// ─── Home assistant threads ───────────────────────────────────────────────────
+//
+// Home used to keep its transcript in React state alone, so a refresh destroyed
+// the conversation and there was no way to find anything previously asked. These
+// persist it. Threads are scoped to the signed-in user by the API, not by this
+// client — a colleague's threads are not reachable by asking for them.
+
+export const threadsApi = {
+  list: () => operation('/crm-read', 'list_threads', { limit: 40 }, z.array(ThreadSummarySchema)),
+
+  get: (id: string) => operation('/crm-read', 'get_thread', { id }, ThreadSchema.nullable()),
+
+  /**
+   * Upsert the thread and append whatever turns the server has not yet stored.
+   * The full transcript is sent every time; the server appends by sequence, so
+   * re-sending is idempotent rather than duplicating.
+   */
+  save: (body: {
+    id?: string;
+    title?: string;
+    goal: string;
+    starter?: string;
+    turns: { role: string; kind: string; body: string; data?: Record<string, unknown> }[];
+  }) => operation('/crm-write', 'save_thread', body as unknown as Record<string, unknown>,
+    z.object({ ok: z.boolean().optional(), id: z.string(), appended: z.coerce.number().optional() }).passthrough()),
+
+  archive: (id: string) => operation('/crm-write', 'archive_thread', { id }, OkSchema),
 };
 
 // ─── Invitations ──────────────────────────────────────────────────────────────

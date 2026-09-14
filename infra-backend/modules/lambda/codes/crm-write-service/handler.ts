@@ -32,6 +32,8 @@ type Operation =
   | 'create_invitation'     // restricted: invitation-service only
   | 'revoke_invitation'     // restricted: invitation-service only
   | 'consume_invitation'    // restricted: tenant-provisioner only
+  | 'save_thread'           // Home assistant transcript; owner-scoped, API only
+  | 'archive_thread'        // Home assistant transcript; owner-scoped, API only
   | 'save_sso_intent'
   | 'patch_expansion_config'
   | 'erase_dsar'
@@ -534,6 +536,111 @@ async function consumeInvitation(db: ReturnType<typeof getDb> extends Promise<in
   return { id: (row?.id as string) ?? null, role: (row?.role as string) ?? null };
 }
 
+const TURN_KINDS = new Set(['text', 'error', 'questions', 'plan']);
+/** A thread is a scratchpad, not an archive. Far past what anyone scrolls back through. */
+const MAX_TURNS_PER_THREAD = 400;
+
+/**
+ * Create or update one Home thread and APPEND any turns it does not yet have.
+ *
+ * Append-only by sequence number, deliberately. The browser re-sends the whole
+ * transcript on every save, so a retry, a double-click or two tabs on the same
+ * thread must not duplicate turns — only rows with seq beyond what is already
+ * stored are inserted. That also means a save cannot rewrite history: an earlier
+ * turn is never updated or deleted by this path.
+ *
+ * ownerSub scopes everything. An UPDATE that does not match the owner touches no
+ * rows, so passing someone else's thread id changes nothing rather than
+ * succeeding quietly on their data.
+ */
+async function saveThread(
+  db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never,
+  tenantId: string,
+  ownerSub: string,
+  p: Record<string, unknown>,
+) {
+  if (!ownerSub) throw new Error('save_thread: no authenticated user');
+
+  const rawTurns = Array.isArray(p.turns) ? (p.turns as Record<string, unknown>[]) : [];
+  if (rawTurns.length > MAX_TURNS_PER_THREAD) {
+    throw new Error(`save_thread: a thread cannot exceed ${MAX_TURNS_PER_THREAD} turns`);
+  }
+
+  const goal = String(p.goal ?? '').slice(0, 4000);
+  // The list needs something readable; the first goal is the honest label.
+  const title = (String(p.title ?? '').trim() || goal).slice(0, 200);
+  const starter = p.starter == null ? null : String(p.starter).slice(0, 80);
+
+  let threadId = String(p.id ?? '');
+
+  if (threadId) {
+    const updated = await db.query(
+      `UPDATE assistant_thread
+          SET title = $3, goal = $4, starter = $5, updated_at = NOW()
+        WHERE id = $1 AND tenant_id = $2 AND user_sub = $6
+        RETURNING id`,
+      [threadId, tenantId, title, goal, starter, ownerSub],
+    );
+    // Not theirs, or gone. Never fall through to creating a new one under this
+    // id — that would let a guessed id decide a row's primary key.
+    if (updated.rowCount === 0) throw new Error('save_thread: no such thread');
+  } else {
+    const created = await db.query(
+      `INSERT INTO assistant_thread (tenant_id, user_sub, title, goal, starter)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
+      [tenantId, ownerSub, title, goal, starter],
+    );
+    threadId = created.rows[0].id as string;
+  }
+
+  const existing = await db.query(
+    `SELECT COALESCE(MAX(seq), -1)::int AS max_seq FROM assistant_turn WHERE thread_id = $1`,
+    [threadId],
+  );
+  const from = Number(existing.rows[0]?.max_seq ?? -1) + 1;
+
+  for (let seq = from; seq < rawTurns.length; seq += 1) {
+    const turn = rawTurns[seq] ?? {};
+    const role = turn.role === 'user' ? 'user' : 'assistant';
+    const kind = TURN_KINDS.has(String(turn.kind)) ? String(turn.kind) : 'text';
+    const body = String(turn.body ?? turn.text ?? '').slice(0, 20000);
+    const data = turn.data && typeof turn.data === 'object' ? turn.data : {};
+    await db.query(
+      `INSERT INTO assistant_turn (tenant_id, thread_id, seq, role, kind, body, data)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+      [tenantId, threadId, seq, role, kind, body, JSON.stringify(data)],
+    );
+  }
+
+  return { id: threadId, appended: Math.max(0, rawTurns.length - from) };
+}
+
+async function archiveThread(
+  db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never,
+  tenantId: string,
+  ownerSub: string,
+  p: Record<string, unknown>,
+) {
+  const id = String(p.id ?? '');
+  if (!id) throw new Error('archive_thread: id is required');
+  if (!ownerSub) throw new Error('archive_thread: no authenticated user');
+  const res = await db.query(
+    `UPDATE assistant_thread SET status = 'archived', updated_at = NOW()
+      WHERE id = $1 AND tenant_id = $2 AND user_sub = $3
+      RETURNING id`,
+    [id, tenantId, ownerSub],
+  );
+  if (res.rowCount === 0) throw new Error('archive_thread: no such thread');
+  return id;
+}
+
+/** The Cognito sub of the signed-in caller. Threads are scoped to it. */
+function subOf(event: APIGatewayProxyEvent): string {
+  const claims = event.requestContext?.authorizer?.claims as Record<string, unknown> | undefined;
+  return String(claims?.sub ?? '');
+}
+
 function isManagerOrAdmin(event: APIGatewayProxyEvent): boolean {
   const claims = event.requestContext?.authorizer?.claims as Record<string, unknown> | undefined;
   const raw = claims?.['cognito:groups'];
@@ -907,6 +1014,25 @@ const dispatch: Handler<
         const claimed = await consumeInvitation(db, tenantId, payload);
         // No row means no valid invitation — the caller must not grant a role.
         return { ok: true, id: claimed.id, role: claimed.role };
+      }
+
+      case 'save_thread': {
+        // A Home thread belongs to a signed-in person. There is no agent path:
+        // an agent has no `sub`, so it could only ever write an unowned thread.
+        if (!('requestContext' in event)) {
+          return { ok: false, error: 'save_thread: requires a signed-in user' };
+        }
+        const saved = await saveThread(db, tenantId, subOf(event as APIGatewayProxyEvent), payload);
+        return { ok: true, id: saved.id, appended: saved.appended };
+      }
+
+      case 'archive_thread': {
+        if (!('requestContext' in event)) {
+          return { ok: false, error: 'archive_thread: requires a signed-in user' };
+        }
+        entityId   = await archiveThread(db, tenantId, subOf(event as APIGatewayProxyEvent), payload);
+        entityType = 'assistant_thread';
+        break;
       }
 
       case 'save_sso_intent':

@@ -3,11 +3,22 @@
  *
  * Confirm starts the run asynchronously (API Gateway cannot wait on a Swarm).
  * This page polls the agent_run on 1m, then 3m, then 5m gaps.
+ *
+ * WHY THERE IS A HISTORY LIST AND A REHYDRATE
+ * This was a launcher and nothing else: the run id lived in React state, so
+ * navigating away during a run that can take half an hour lost the only handle
+ * to it, and there was no list of past research anywhere. A person who started
+ * a Swarm and closed the tab could not find their own results.
+ *
+ * On mount it now reads this workspace's deep_research runs, adopts one that is
+ * still going (so the wait resumes instead of restarting), and lists the rest.
+ * Each links to /control-panel/:runId, which is where the findings are actually
+ * rendered.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Loader2, Search, Zap } from 'lucide-react';
+import { Check, Clock, Loader2, Search, TriangleAlert, Zap } from 'lucide-react';
 import { AppShell } from '@/components/app/AppShell';
 import { SEO } from '@/components/SEO';
 import { agentRunsApi, intentApi } from '@/api/client';
@@ -45,9 +56,41 @@ export default function DeepResearchPage() {
   const [inspectHref, setInspectHref] = useState('/control-panel');
   const [run, setRun] = useState<AgentRun | null>(null);
   const [nextCheckAt, setNextCheckAt] = useState<number | null>(null);
+  const [history, setHistory] = useState<AgentRun[] | null>(null);
   const pollIndex = useRef(0);
   const startedAt = useRef<number | null>(null);
   const now = useNow(1000);
+
+  const loadHistory = useCallback(async () => {
+    try {
+      const page = await agentRunsApi.list(1, 50);
+      const mine = page.items.filter(r => r.agentType === 'deep_research');
+      setHistory(mine);
+      return mine;
+    } catch {
+      // History is additive; a failure here must not block starting a new run.
+      setHistory([]);
+      return [];
+    }
+  }, []);
+
+  // Adopt a run that is still going, so returning to this page resumes the wait
+  // rather than presenting an empty form while a Swarm burns tokens unseen.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const mine = await loadHistory();
+      if (cancelled || runId) return;
+      const active = mine.find(r => r.status === 'running' || r.status === 'pending');
+      if (!active) return;
+      setRun(active);
+      setInspectHref(`/control-panel/${active.id}`);
+      startedAt.current = new Date(active.startedAt).getTime();
+      pollIndex.current = 0;
+      setRunId(active.id);
+    })();
+    return () => { cancelled = true; };
+  }, [loadHistory, runId]);
 
   useEffect(() => {
     if (!runId) return;
@@ -62,6 +105,7 @@ export default function DeepResearchPage() {
         if (latest) setRun(latest);
         if (latest?.status === 'completed' || latest?.status === 'failed') {
           setNextCheckAt(null);
+          void loadHistory();
           return;
         }
       } catch {
@@ -87,7 +131,7 @@ export default function DeepResearchPage() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [runId]);
+  }, [runId, loadHistory]);
 
   async function preview() {
     const researchGoal = goal.trim();
@@ -129,7 +173,7 @@ export default function DeepResearchPage() {
         endedAt: null,
         error: null,
       } as AgentRun);
-      setInspectHref(res.inspectHref || `/control-panel?run=${res.id}`);
+      setInspectHref(`/control-panel/${res.id}`);
       setRunId(res.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Research run failed.');
@@ -139,8 +183,14 @@ export default function DeepResearchPage() {
   }
 
   const running = Boolean(runId) && run?.status !== 'completed' && run?.status !== 'failed';
-  const timedOutWaiting = Boolean(runId) && running && startedAt.current != null
-    && Date.now() - startedAt.current >= POLL_CAP_MS && nextCheckAt == null;
+  // Derived from STATE, not from the startedAt ref, and from the ticking `now`
+  // rather than Date.now(). Reading a ref or calling Date.now() during render
+  // makes the result unstable across re-renders -- and this string is the only
+  // thing telling someone their Swarm has stopped reporting. The ref stays for
+  // the polling effect, where reading it is fine.
+  const startedMs = run ? new Date(run.startedAt).getTime() : null;
+  const timedOutWaiting = Boolean(runId) && running && startedMs != null
+    && now - startedMs >= POLL_CAP_MS && nextCheckAt == null;
 
   return (
     <AppShell>
@@ -222,7 +272,7 @@ export default function DeepResearchPage() {
                     : 'Checking status…'}
               </p>
               <Link to={inspectHref} className="inline-block mt-2 text-indigo-600 dark:text-indigo-400 font-semibold hover:underline">
-                Open in Control Panel
+                Watch this run
               </Link>
             </div>
           )}
@@ -230,7 +280,7 @@ export default function DeepResearchPage() {
           {run?.status === 'failed' && (
             <p className="text-[0.82rem] text-red-600 dark:text-red-400">
               {run.error || 'The research run failed.'}{' '}
-              <Link to={inspectHref} className="font-semibold underline">Open in Control Panel</Link>
+              <Link to={inspectHref} className="font-semibold underline">See what happened</Link>
             </p>
           )}
 
@@ -238,7 +288,7 @@ export default function DeepResearchPage() {
             <div className="rounded-xl border border-emerald-200 dark:border-emerald-500/25 bg-emerald-50/70 dark:bg-emerald-500/10 px-4 py-3 text-[0.84rem] text-slate-700 dark:text-slate-300">
               <p className="font-semibold text-emerald-800 dark:text-emerald-200">Research finished.</p>
               <Link to={inspectHref} className="inline-block mt-2 text-indigo-600 dark:text-indigo-400 font-semibold hover:underline">
-                View the run
+                Read the findings
               </Link>
             </div>
           )}
@@ -265,6 +315,62 @@ export default function DeepResearchPage() {
             </button>
           ))}
         </motion.div>
+
+        {/* ── Your research ──────────────────────────────────────────────────
+            Previously there was nothing here, so a finished Swarm was findable
+            only by remembering its run id. Ordered newest first; each row is the
+            link to the findings. */}
+        {history && history.length > 0 && (
+          <motion.section
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.1, ease }}
+            className="mt-10"
+          >
+            <h2 className="text-[0.78rem] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-600 mb-3">
+              Your research
+            </h2>
+            <ul className="rounded-2xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#0d1526] overflow-hidden">
+              {history.map((r) => {
+                const label = typeof r.input?.goal === 'string' && r.input.goal.trim()
+                  ? String(r.input.goal)
+                  : 'Untitled research';
+                const done = r.status === 'completed';
+                const failed = r.status === 'failed';
+                return (
+                  <li key={r.id} className="border-b border-slate-50 dark:border-white/[0.03] last:border-0">
+                    <Link
+                      to={`/control-panel/${r.id}`}
+                      className="flex items-start gap-3 px-4 py-3 hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors"
+                    >
+                      <span className="mt-0.5 flex-shrink-0">
+                        {done ? <Check size={14} className="text-emerald-500" />
+                          : failed ? <TriangleAlert size={14} className="text-rose-500" />
+                          : <Loader2 size={14} className="animate-spin text-indigo-500" />}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-[0.84rem] font-medium text-slate-800 dark:text-slate-200 line-clamp-2">
+                          {label}
+                        </span>
+                        <span className="flex items-center gap-1.5 text-[0.72rem] text-slate-400 dark:text-slate-600">
+                          <Clock size={11} />
+                          {new Date(r.startedAt).toLocaleString()}
+                          {failed && r.error ? ` · ${r.error}` : ''}
+                        </span>
+                      </span>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          </motion.section>
+        )}
+
+        {history !== null && history.length === 0 && (
+          <p className="mt-10 text-[0.82rem] text-slate-400 dark:text-slate-600">
+            No research has been run in this workspace yet. Finished runs appear here.
+          </p>
+        )}
       </div>
     </AppShell>
   );

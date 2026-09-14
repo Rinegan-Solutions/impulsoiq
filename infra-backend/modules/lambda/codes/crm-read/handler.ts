@@ -72,7 +72,9 @@ type Operation =
   | 'get_outbound_quality'
   | 'get_campaign_usage'
   | 'list_invitations'
-  | 'find_invitation'       // direct invocation only (token lookup)
+  | 'find_invitation'
+  | 'list_threads'
+  | 'get_thread'       // direct invocation only (token lookup)
   | 'export_dsar'
   | 'export_audit'
   | 'get_channel_efficacy'
@@ -116,6 +118,12 @@ function tenantFromEvent(event: APIGatewayProxyEvent): string | null {
 // workspace, or it claimed a valid invitation). An account whose
 // provisioning failed or was refused has the claim but no group, and must reach
 // no data at all.
+/** The Cognito sub of the signed-in caller. Home threads are scoped to it. */
+function subOf(event: APIGatewayProxyEvent): string {
+  const claims = event.requestContext?.authorizer?.claims as Record<string, unknown> | undefined;
+  return String(claims?.sub ?? '');
+}
+
 const WORKSPACE_ROLES = new Set(['admin', 'manager', 'member']);
 
 function hasWorkspaceRole(event: APIGatewayProxyEvent): boolean {
@@ -1207,6 +1215,55 @@ const dispatch: Handler<
           [tokenHash],
         );
         return { result: rows.rows[0] ?? null };
+      }
+
+      case 'list_threads': {
+        // Owner-scoped, not tenant-scoped: a Home thread is one person's
+        // scratchpad. Scoping this by tenant alone would put every colleague's
+        // half-finished questions in everybody's sidebar.
+        if (!('requestContext' in event)) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'threads require a signed-in user' }) };
+        }
+        const sub = subOf(event as APIGatewayProxyEvent);
+        if (!sub) return { result: [] };
+        const limit = Math.min(100, Math.max(1, Number(payload.limit ?? 40)));
+        const rows = await db.query(
+          `SELECT t.id, t.title, t.goal, t.starter, t.status, t.created_at, t.updated_at,
+                  (SELECT COUNT(*)::int FROM assistant_turn tr WHERE tr.thread_id = t.id) AS turn_count
+             FROM assistant_thread t
+            WHERE t.tenant_id = $1 AND t.user_sub = $2 AND t.status = 'active'
+            ORDER BY t.updated_at DESC
+            LIMIT $3`,
+          [tenantId, sub, limit],
+        );
+        return { result: rows.rows };
+      }
+
+      case 'get_thread': {
+        if (!('requestContext' in event)) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'threads require a signed-in user' }) };
+        }
+        const sub = subOf(event as APIGatewayProxyEvent);
+        const id = String(payload.id ?? '');
+        if (!sub || !id) return { result: null };
+        // The owner check is in the thread query, and the turn query is keyed on
+        // a thread id that has already passed it — so an id belonging to someone
+        // else returns null rather than their transcript.
+        const head = await db.query(
+          `SELECT id, title, goal, starter, status, created_at, updated_at
+             FROM assistant_thread
+            WHERE id = $1 AND tenant_id = $2 AND user_sub = $3`,
+          [id, tenantId, sub],
+        );
+        if (!head.rows[0]) return { result: null };
+        const turns = await db.query(
+          `SELECT seq, role, kind, body, data, created_at
+             FROM assistant_turn
+            WHERE thread_id = $1 AND tenant_id = $2
+            ORDER BY seq`,
+          [id, tenantId],
+        );
+        return { result: { ...head.rows[0], turns: turns.rows } };
       }
 
       case 'export_dsar': {

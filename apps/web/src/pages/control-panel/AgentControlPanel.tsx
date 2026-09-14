@@ -7,27 +7,14 @@ import type { AgentRun } from '@/api/schemas';
 import { AppShell } from '@/components/app/AppShell';
 import { SEO } from '@/components/SEO';
 import { cn } from '@/lib/utils';
+import { AGENT_LABEL } from '@/lib/agentLabels';
 import { useNow } from '@/lib/useNow';
 import { subscribeAgentActions, appsyncConfigured } from '@/lib/appsync';
 
 const FEED_POLL_MS = 15_000;
 
-const AGENT_LABEL: Record<string, string> = {
-  research_enrichment: 'Research',
-  outreach:            'Outreach',
-  voice:               'Voice',
-  nurture:             'Nurture',
-  clarification:       'Clarify',
-  coordinator:         'Coord',
-  forecasting_insight: 'Forecast',
-  data_hygiene:        'Hygiene',
-  ambient_interface:   'Ambient',
-  deep_research:       'Research+',
-  signal_listening:    'Signals',
-  triage_escalation:   'Triage',
-  resolution:          'Resolve',
-  support_insight:     'Support',
-};
+// Labels moved to lib/agentLabels.ts so the run detail view and the research
+// history render the same names as this table.
 
 const STATUS_TEXT: Record<AgentRun['status'], string> = {
   pending:   'queued',
@@ -99,6 +86,9 @@ export default function AgentControlPanel() {
   const [runs, setRuns]       = useState<AgentRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter]   = useState<'all'|AgentRun['status']>('all');
+  // Status was the only axis, so a research run was buried among dozens of
+  // outreach and voice runs with no way to say "show me the research".
+  const [agentFilter, setAgentFilter] = useState<string>('all');
   const [live, setLive]       = useState(false);
   const [liveDetail, setLiveDetail] = useState(appsyncConfigured() ? 'Connecting…' : 'Poll fallback');
   const [notice, setNotice]   = useState<string | null>(null);
@@ -192,7 +182,11 @@ export default function AgentControlPanel() {
     if (campaignFilter) return r.campaignId === campaignFilter;
     return true;
   });
-  const filtered = filter === 'all' ? scoped : scoped.filter(r => r.status === filter);
+  const byStatus = filter === 'all' ? scoped : scoped.filter(r => r.status === filter);
+  const filtered = agentFilter === 'all' ? byStatus : byStatus.filter(r => r.agentType === agentFilter);
+  // Only offer types this workspace has actually run — a dropdown of 14 agents
+  // most of which return nothing is a worse list than a short honest one.
+  const agentTypes = Array.from(new Set(scoped.map(r => r.agentType))).sort();
   const runCount = scoped.filter(r => r.status === 'running').length;
 
   return (
@@ -269,15 +263,34 @@ export default function AgentControlPanel() {
         <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-5">
 
           <div className="space-y-3">
-            <div className="flex items-center gap-1 bg-slate-100 dark:bg-white/[0.04] rounded-xl p-1 w-fit">
-              {(['all','running','paused','completed','failed'] as const).map(f => (
-                <button key={f} onClick={() => setFilter(f)}
-                  className={cn('px-3 py-1.5 rounded-lg text-[0.78rem] font-semibold transition-all capitalize',
-                    filter === f ? 'bg-white dark:bg-[#0d1526] text-slate-900 dark:text-white shadow-sm'
-                      : 'text-slate-500 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300')}>
-                  {f}
-                </button>
-              ))}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-1 bg-slate-100 dark:bg-white/[0.04] rounded-xl p-1 w-fit">
+                {(['all','running','paused','completed','failed'] as const).map(f => (
+                  <button key={f} onClick={() => setFilter(f)}
+                    className={cn('px-3 py-1.5 rounded-lg text-[0.78rem] font-semibold transition-all capitalize',
+                      filter === f ? 'bg-white dark:bg-[#0d1526] text-slate-900 dark:text-white shadow-sm'
+                        : 'text-slate-500 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300')}>
+                    {f}
+                  </button>
+                ))}
+              </div>
+
+              {agentTypes.length > 1 && (
+                <>
+                  <label className="sr-only" htmlFor="agent-filter">Filter by agent</label>
+                  <select
+                    id="agent-filter"
+                    value={agentFilter}
+                    onChange={e => setAgentFilter(e.target.value)}
+                    className="h-[34px] px-2.5 rounded-xl border border-slate-200 dark:border-white/[0.1] bg-white dark:bg-white/[0.04] text-[0.78rem] font-semibold text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+                  >
+                    <option value="all">All agents</option>
+                    {agentTypes.map(t => (
+                      <option key={t} value={t}>{AGENT_LABEL[t] ?? t}</option>
+                    ))}
+                  </select>
+                </>
+              )}
             </div>
 
             <div className="bg-white dark:bg-[#0d1526] border border-slate-200 dark:border-white/[0.065] rounded-2xl overflow-hidden">
@@ -289,7 +302,9 @@ export default function AgentControlPanel() {
               {loading ? (
                 <div className="py-12 text-center text-[0.84rem] text-slate-400 dark:text-slate-600">Loading runs…</div>
               ) : filtered.length === 0 ? (
-                <div className="py-12 text-center text-[0.84rem] text-slate-400 dark:text-slate-600">No {filter !== 'all' ? filter : ''} runs</div>
+                <div className="py-12 text-center text-[0.84rem] text-slate-400 dark:text-slate-600">
+                  No {filter !== 'all' ? filter : ''} runs{agentFilter !== 'all' ? ` for ${AGENT_LABEL[agentFilter] ?? agentFilter}` : ''}
+                </div>
               ) : (
                 filtered.map((r, i) => {
                   const elapsed = Math.floor((now - new Date(r.startedAt).getTime()) / 60000);
@@ -298,14 +313,18 @@ export default function AgentControlPanel() {
                     <motion.div key={r.id} initial={{opacity:0}} animate={{opacity:1}} transition={{delay:i*0.03}}
                       className="grid px-4 py-3 border-b border-slate-50 dark:border-white/[0.03] last:border-0 items-center text-[0.8rem] hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors group"
                       style={{ gridTemplateColumns: '1fr 80px 80px 90px 100px' }}>
-                      <div className="min-w-0">
-                        <p className="font-semibold text-slate-800 dark:text-slate-200 truncate">{who}</p>
-                        <p className="text-[0.7rem] text-slate-400 dark:text-slate-600 truncate">
-                          {r.error || r.agentType}
-                          {r.costJson && typeof r.costJson === 'object' && Object.keys(r.costJson).length > 0
-                            ? ` · ${JSON.stringify(r.costJson)}` : ''}
+                      {/* The whole identity cell is the link: a run's output was
+                          previously unreachable from this table. Cost stays out of
+                          the row -- it was raw JSON.stringify here, which is what
+                          the detail page renders properly. */}
+                      <Link to={`/control-panel/${r.id}`} className="min-w-0 group/row">
+                        <p className="font-semibold text-slate-800 dark:text-slate-200 truncate group-hover/row:text-indigo-600 dark:group-hover/row:text-indigo-400 transition-colors">
+                          {who}
                         </p>
-                      </div>
+                        <p className="text-[0.7rem] text-slate-400 dark:text-slate-600 truncate">
+                          {r.error || AGENT_LABEL[r.agentType] || r.agentType}
+                        </p>
+                      </Link>
                       <span className={cn('inline-flex items-center gap-1.5 text-[0.63rem] font-bold px-1.5 py-0.5 rounded-lg w-fit', STATUS_CLS[r.status])}>
                         <span className={cn('w-1.5 h-1.5 rounded-full', STATUS_DOT[r.status])} />
                         {r.status}

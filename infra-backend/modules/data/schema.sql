@@ -346,6 +346,61 @@ CREATE UNIQUE INDEX ASYNC IF NOT EXISTS idx_invitation_token  ON invitation(toke
 CREATE        INDEX ASYNC IF NOT EXISTS idx_invitation_tenant ON invitation(tenant_id, status);
 CREATE        INDEX ASYNC IF NOT EXISTS idx_invitation_email  ON invitation(email, tenant_id);
 
+-- ── Home assistant threads ────────────────────────────────────────────────────
+-- What the Home composer produces. Until these existed the transcript lived in
+-- React state only: a refresh, a navigation, or a closed tab destroyed the whole
+-- conversation, and there was no surface anywhere in the product showing what a
+-- person had previously asked for.
+--
+-- WHY NOT conversation/message (schema-phase7.sql)
+-- Those are contact-centre entities: they carry a contact_id, a channel
+-- (email|chat|sms|voice|social), sender types of customer|human_rep|agent, and
+-- CSAT. A Home thread has none of those, and storing it there would put an
+-- internal assistant chat into support queues, SLA timers and CSAT averages.
+--
+-- OWNERSHIP
+-- A thread belongs to ONE person, not to the workspace: user_sub is the Cognito
+-- sub, and every read and write is scoped by (tenant_id, user_sub). A manager
+-- cannot page through a colleague's assistant history -- it is a private
+-- scratchpad, not a shared record. Anything that becomes shared work (a
+-- campaign, an agent run) is already its own first-class row.
+CREATE TABLE IF NOT EXISTS assistant_thread (
+  id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id  TEXT        NOT NULL REFERENCES tenant(id),
+  user_sub   TEXT        NOT NULL,
+  -- First goal, trimmed, so the history list reads as a sentence rather than an id.
+  title      TEXT        NOT NULL DEFAULT '',
+  -- The goal the thread is ABOUT, kept apart from the transcript: clarification
+  -- answers are echoed as user turns, so the last user turn is not the goal.
+  goal       TEXT        NOT NULL DEFAULT '',
+  starter    TEXT,
+  status     TEXT        NOT NULL DEFAULT 'active'
+               CHECK (status IN ('active','archived')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX ASYNC IF NOT EXISTS idx_assistant_thread_owner  ON assistant_thread(tenant_id, user_sub, updated_at);
+CREATE INDEX ASYNC IF NOT EXISTS idx_assistant_thread_status ON assistant_thread(tenant_id, status);
+
+-- One row per rendered turn. `kind` and `data` mirror the Turn union in
+-- apps/web/src/pages/HomePage.tsx: text and error carry body; questions and plan
+-- carry their payload in data, so a reloaded thread renders identically to a
+-- live one instead of degrading to flat text.
+CREATE TABLE IF NOT EXISTS assistant_turn (
+  id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id  TEXT        NOT NULL REFERENCES tenant(id),
+  thread_id  UUID        NOT NULL REFERENCES assistant_thread(id),
+  seq        INTEGER     NOT NULL,
+  role       TEXT        NOT NULL CHECK (role IN ('user','assistant')),
+  kind       TEXT        NOT NULL DEFAULT 'text'
+               CHECK (kind IN ('text','error','questions','plan')),
+  body       TEXT        NOT NULL DEFAULT '',
+  data       JSONB       NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX ASYNC IF NOT EXISTS idx_assistant_turn_thread ON assistant_turn(thread_id, seq);
+CREATE INDEX ASYNC IF NOT EXISTS idx_assistant_turn_tenant ON assistant_turn(tenant_id);
+
 -- ── Phase 6C: A2A handoff log ──────────────────────────────────────────────────
 -- Records cross-department agent handoff events for audit and observability.
 CREATE TABLE IF NOT EXISTS a2a_handoff (

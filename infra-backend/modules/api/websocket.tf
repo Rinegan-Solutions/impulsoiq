@@ -6,7 +6,8 @@
 # Routes:
 #   $connect    → voice-bridge Lambda (validates JWT, stores connection)
 #   $disconnect → voice-bridge Lambda (cleanup)
-#   $default    → voice-bridge Lambda (message forwarding to Nova Sonic)
+#   $default    → voice-bridge Lambda (acks, then Event-invokes itself to run
+#                 the agent and PostToConnection). Integration timeout is 29s.
 
 resource "aws_apigatewayv2_api" "voice" {
   name                       = "${var.project}-voice-ws-${var.env}"

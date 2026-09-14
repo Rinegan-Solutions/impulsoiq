@@ -14,12 +14,25 @@
  *
  * Sales starters always. CS / recruiting / vendor / appointments only after a
  * paying CS design-partner flag. AR is never offered here.
+ *
+ * PERSISTENCE
+ * The transcript used to live in React state alone: a refresh, a navigation or a
+ * closed tab destroyed the conversation, and nothing in the product showed what
+ * a person had previously asked for. Threads are now saved to DSQL after every
+ * settled exchange and are owner-scoped — your Home history is yours, not the
+ * workspace's.
+ *
+ * The thread id is carried in ?thread=, so a conversation has a real address:
+ * browser back works, and a thread can be reopened or linked to. Saving is
+ * append-only by sequence, so re-sending the transcript is idempotent rather
+ * than duplicating turns.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, useReducedMotion } from 'framer-motion';
-import { ArrowDown, ArrowRight, Cpu, Mail, Phone, Search, Sparkles } from 'lucide-react';
-import { intentApi, type IntentPlanResponse, type IntentQuestion } from '@/api/client';
+import { ArrowDown, ArrowRight, Cpu, History, Mail, Phone, Plus, Search, Sparkles } from 'lucide-react';
+import { intentApi, threadsApi, type IntentPlanResponse, type IntentQuestion } from '@/api/client';
+import type { Thread, ThreadSummary } from '@/api/schemas';
 import { AppShell } from '@/components/app/AppShell';
 import { VoiceInterface } from '@/components/app/VoiceInterface';
 import { SEO } from '@/components/SEO';
@@ -51,6 +64,53 @@ type Turn =
   | { id: string; role: 'assistant'; kind: 'error'; text: string }
   | { id: string; role: 'assistant'; kind: 'questions'; questions: IntentQuestion[]; answered: boolean }
   | { id: string; role: 'assistant'; kind: 'plan'; plan: IntentPlanResponse };
+
+/**
+ * Turn <-> stored row.
+ *
+ * `kind` and `data` are stored rather than flattening everything to text, so a
+ * reopened thread renders as the real thing — the plan card is still a plan
+ * card, the clarification is still a question set — instead of degrading into a
+ * wall of prose. Question sets come back already answered: the thread has moved
+ * on, and re-offering the buttons would invite an answer to a question the
+ * server no longer has context for.
+ */
+function serialiseTurn(turn: Turn): { role: string; kind: string; body: string; data?: Record<string, unknown> } {
+  if (turn.role === 'user') return { role: 'user', kind: 'text', body: turn.text };
+  if (turn.kind === 'questions') {
+    return { role: 'assistant', kind: 'questions', body: '', data: { questions: turn.questions } };
+  }
+  if (turn.kind === 'plan') {
+    return { role: 'assistant', kind: 'plan', body: '', data: { plan: turn.plan } };
+  }
+  return { role: 'assistant', kind: turn.kind, body: turn.text };
+}
+
+function hydrateTurn(row: { role: string; kind: string; body: string; data?: Record<string, unknown> | null }): Turn {
+  const id = newId();
+  if (row.role === 'user') return { id, role: 'user', text: row.body };
+  if (row.kind === 'questions') {
+    return {
+      id, role: 'assistant', kind: 'questions',
+      questions: (row.data?.questions as IntentQuestion[] | undefined) ?? [],
+      answered: true,
+    };
+  }
+  if (row.kind === 'plan') {
+    return { id, role: 'assistant', kind: 'plan', plan: row.data?.plan as IntentPlanResponse };
+  }
+  if (row.kind === 'error') return { id, role: 'assistant', kind: 'error', text: row.body };
+  return { id, role: 'assistant', kind: 'text', text: row.body };
+}
+
+function whenLabel(iso: string): string {
+  const then = new Date(iso);
+  const days = Math.floor((Date.now() - then.getTime()) / 86_400_000);
+  if (days <= 0) return then.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return `${days}d ago`;
+  return then.toLocaleDateString();
+}
 
 function timeGreeting(now: Date): string {
   const h = now.getHours();
@@ -232,7 +292,7 @@ export default function HomePage() {
   const expansionOn = isPayingCsDesignPartner(tenant);
   const starters = useMemo(() => STARTERS.filter((s) => !s.expansion || expansionOn), [expansionOn]);
   const navigate = useNavigate();
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const reduceMotion = useReducedMotion();
 
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -246,6 +306,16 @@ export default function HomePage() {
   const [busy, setBusy] = useState(false);
   const [stick, setStick] = useState(true);
 
+  // Saved threads. `threadId` null means this conversation has not been written
+  // yet — the first save creates it and adopts the id the server returns.
+  const [threads, setThreads] = useState<ThreadSummary[]>([]);
+  const [threadId, setThreadId] = useState<string | null>(params.get('thread'));
+  const [historyOpen, setHistoryOpen] = useState(false);
+  // How many turns the server already holds, so an unchanged transcript is not
+  // re-sent on every render.
+  const savedCount = useRef(0);
+  const saving = useRef(false);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const chatting = turns.length > 0;
 
@@ -254,6 +324,60 @@ export default function HomePage() {
     () => (firstName ? `${timeGreeting(new Date())}, ${firstName}` : timeGreeting(new Date())),
     [firstName],
   );
+
+  const refreshThreads = useCallback(async () => {
+    try {
+      setThreads(await threadsApi.list());
+    } catch {
+      // History is additive. If it cannot be read, the composer still works.
+    }
+  }, []);
+
+  useEffect(() => { void refreshThreads(); }, [refreshThreads]);
+
+  const openThread = useCallback(async (id: string) => {
+    setHistoryOpen(false);
+    try {
+      const thread: Thread | null = await threadsApi.get(id);
+      if (!thread) return;
+      setTurns(thread.turns.map(hydrateTurn));
+      setThreadGoal(thread.goal);
+      setStarter(thread.starter ?? undefined);
+      setAnswers({});
+      setThreadId(thread.id);
+      savedCount.current = thread.turns.length;
+      setStick(true);
+      // The address changes with the thread, so back returns to the previous one.
+      setParams(prev => {
+        const next = new URLSearchParams(prev);
+        next.set('thread', thread.id);
+        next.delete('q');
+        next.delete('starter');
+        return next;
+      }, { replace: false });
+    } catch {
+      // A thread that cannot be opened is left alone rather than half-loaded.
+    }
+  }, [setParams]);
+
+  // ?thread= on arrival — a linked or refreshed conversation.
+  const bootThread = useRef(params.get('thread'));
+  useEffect(() => {
+    const id = bootThread.current;
+    if (id) void openThread(id);
+  }, [openThread]);
+
+  function startNewThread() {
+    setTurns([]);
+    setThreadGoal('');
+    setAnswers({});
+    setStarter(undefined);
+    setGoal('');
+    setThreadId(null);
+    savedCount.current = 0;
+    setHistoryOpen(false);
+    setParams(new URLSearchParams(), { replace: false });
+  }
 
   const append = useCallback((...next: Turn[]) => {
     setTurns((prev) => [
@@ -269,6 +393,45 @@ export default function HomePage() {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [turns, busy, stick]);
+
+  // Save once an exchange has settled. Waiting for !busy means a thread is
+  // written when it has an answer in it, not mid-request — and never on every
+  // keystroke.
+  useEffect(() => {
+    if (busy || turns.length === 0) return;
+    if (turns.length <= savedCount.current) return;
+    if (saving.current) return;
+
+    saving.current = true;
+    const snapshot = turns.length;
+    const firstUser = turns.find(t => t.role === 'user');
+    void (async () => {
+      try {
+        const res = await threadsApi.save({
+          ...(threadId ? { id: threadId } : {}),
+          title: (firstUser && firstUser.role === 'user' ? firstUser.text : threadGoal).slice(0, 200),
+          goal: threadGoal,
+          ...(starter ? { starter } : {}),
+          turns: turns.map(serialiseTurn),
+        });
+        savedCount.current = snapshot;
+        if (!threadId && res.id) {
+          setThreadId(res.id);
+          setParams(prev => {
+            const next = new URLSearchParams(prev);
+            next.set('thread', res.id);
+            return next;
+          }, { replace: true });
+        }
+        void refreshThreads();
+      } catch {
+        // Losing a save must not interrupt the conversation on screen; the next
+        // settled turn retries, and append-only means the retry cannot duplicate.
+      } finally {
+        saving.current = false;
+      }
+    })();
+  }, [turns, busy, threadId, threadGoal, starter, setParams, refreshThreads]);
 
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -378,6 +541,50 @@ export default function HomePage() {
     }
   }
 
+  // Recognition over recall: the last few threads are offered by name rather
+  // than expecting anyone to remember what they asked yesterday.
+  const recent = threads.slice(0, 6);
+
+  const historyMenu = historyOpen && (
+    <>
+      <button
+        type="button"
+        aria-label="Close history"
+        className="fixed inset-0 z-30 cursor-default"
+        onClick={() => setHistoryOpen(false)}
+      />
+      <div className="absolute right-0 top-[calc(100%+6px)] z-40 w-72 max-w-[calc(100vw-2rem)] rounded-2xl border border-slate-200 dark:border-white/[0.1] bg-white dark:bg-[#0d1526] shadow-xl overflow-hidden">
+        {threads.length === 0 ? (
+          <p className="px-4 py-5 text-center text-[0.8rem] text-slate-400 dark:text-slate-600">
+            Nothing saved yet.
+          </p>
+        ) : (
+          <ul className="max-h-80 overflow-y-auto py-1">
+            {threads.map((t) => (
+              <li key={t.id}>
+                <button
+                  type="button"
+                  onClick={() => void openThread(t.id)}
+                  className={cn(
+                    'w-full text-left px-4 py-2.5 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 transition-colors',
+                    t.id === threadId && 'bg-slate-50 dark:bg-white/[0.04]',
+                  )}
+                >
+                  <span className="block text-[0.82rem] font-medium text-slate-800 dark:text-slate-100 line-clamp-2">
+                    {t.title || 'Untitled'}
+                  </span>
+                  <span className="block text-[0.72rem] text-slate-400 dark:text-slate-600">
+                    {whenLabel(t.updatedAt)}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </>
+  );
+
   const chips = (
     <div className="flex flex-wrap items-center gap-2">
       {starters.map((s) => (
@@ -446,15 +653,84 @@ export default function HomePage() {
                   placeholder="e.g. Qualify inbound leads this week and email the ones that match our ICP"
                 />
                 <div className="mt-3 flex justify-center">{chips}</div>
+
+                {/* Picking up where you left off is the most common intent on a
+                    surface like this, so it is offered before anything is typed
+                    rather than hidden behind a menu. */}
+                {recent.length > 0 && (
+                  <div className="mt-8">
+                    <div className="flex items-center justify-between mb-2">
+                      <h2 className="text-[0.72rem] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-600">
+                        Pick up where you left off
+                      </h2>
+                      {threads.length > recent.length && (
+                        <div className="relative">
+                          <button
+                            type="button"
+                            onClick={() => setHistoryOpen(o => !o)}
+                            aria-expanded={historyOpen}
+                            className="text-[0.74rem] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                          >
+                            All {threads.length}
+                          </button>
+                          {historyMenu}
+                        </div>
+                      )}
+                    </div>
+                    <ul className="rounded-2xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#0d1526] overflow-hidden">
+                      {recent.map((t) => (
+                        <li key={t.id} className="border-b border-slate-50 dark:border-white/[0.03] last:border-0">
+                          <button
+                            type="button"
+                            onClick={() => void openThread(t.id)}
+                            className="w-full text-left px-4 py-2.5 hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors"
+                          >
+                            <span className="block text-[0.83rem] font-medium text-slate-800 dark:text-slate-100 truncate">
+                              {t.title || 'Untitled'}
+                            </span>
+                            <span className="block text-[0.72rem] text-slate-400 dark:text-slate-600">
+                              {whenLabel(t.updatedAt)}
+                              {t.turnCount ? ` · ${t.turnCount} turns` : ''}
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </motion.div>
             </div>
           ) : (
             // ── Conversation: transcript above, composer docked below ──
-            <div
-              className={cn(COLUMN, 'py-6 space-y-4')}
-              aria-live="polite"
-              aria-busy={busy}
-            >
+            <div className={cn(COLUMN, 'py-6')}>
+              {/* Where you are, and the two ways out of it. Without this a
+                  conversation had no exit but the browser back button, and no
+                  way to reach an earlier one. */}
+              <div className="flex items-center gap-2 pb-3 mb-3 border-b border-slate-100 dark:border-white/[0.05]">
+                <span className="flex-1 min-w-0 text-[0.8rem] font-semibold text-slate-500 dark:text-slate-400 truncate">
+                  {threads.find(t => t.id === threadId)?.title || threadGoal || 'New thread'}
+                </span>
+                <button
+                  type="button"
+                  onClick={startNewThread}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[0.76rem] font-semibold text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-white/[0.06] hover:text-slate-900 dark:hover:text-white transition-colors"
+                >
+                  <Plus size={13} /> New
+                </button>
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setHistoryOpen(o => !o)}
+                    aria-expanded={historyOpen}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[0.76rem] font-semibold text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-white/[0.06] hover:text-slate-900 dark:hover:text-white transition-colors"
+                  >
+                    <History size={13} /> History
+                  </button>
+                  {historyMenu}
+                </div>
+              </div>
+
+              <div className="space-y-4" aria-live="polite" aria-busy={busy}>
               {turns.map((turn) => {
                 if (turn.role === 'user') return <UserBubble key={turn.id} text={turn.text} />;
                 if (turn.kind === 'error') return <AssistantCard key={turn.id} tone="error">{turn.text}</AssistantCard>;
@@ -499,6 +775,7 @@ export default function HomePage() {
               {busy && (
                 <p className="text-[0.8rem] text-slate-400 dark:text-slate-500">Thinking…</p>
               )}
+              </div>
             </div>
           )}
         </div>
@@ -519,13 +796,20 @@ export default function HomePage() {
                   <ArrowDown size={12} /> Jump to latest
                 </button>
               )}
-              <Composer
-                value={goal}
-                onChange={setGoal}
-                onSubmit={submitComposer}
-                busy={busy}
-                placeholder="Reply, or describe the next outcome…"
-              />
+              <div className="flex items-end gap-2">
+                <div className="flex-1 min-w-0">
+                  <Composer
+                    value={goal}
+                    onChange={setGoal}
+                    onSubmit={submitComposer}
+                    busy={busy}
+                    placeholder="Reply, or describe the next outcome…"
+                  />
+                </div>
+                <div className="pb-1">
+                  <VoiceInterface />
+                </div>
+              </div>
             </div>
           </div>
         )}

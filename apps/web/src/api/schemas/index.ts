@@ -349,3 +349,36 @@ export const InvitationSchema = z.object({
 
 export type Invitation = z.infer<typeof InvitationSchema>;
 export type InvitationRole = z.infer<typeof InvitationRoleSchema>;
+
+// ─── Home assistant threads ───────────────────────────────────────────────────
+// A saved Home conversation. `data` carries the payload for the turn kinds that
+// are not plain prose (questions, plan), so a reloaded thread renders exactly
+// as the live one did rather than collapsing to text.
+
+export const ThreadTurnSchema = z.object({
+  seq: z.coerce.number(),
+  role: z.enum(['user', 'assistant']),
+  kind: z.enum(['text', 'error', 'questions', 'plan']),
+  body: z.string(),
+  data: z.record(z.string(), z.unknown()).nullable().optional(),
+  createdAt: z.string().optional(),
+});
+
+export const ThreadSummarySchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  goal: z.string(),
+  starter: z.string().nullable().optional(),
+  status: z.enum(['active', 'archived']),
+  turnCount: z.coerce.number().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+export const ThreadSchema = ThreadSummarySchema.extend({
+  turns: z.array(ThreadTurnSchema),
+});
+
+export type Thread = z.infer<typeof ThreadSchema>;
+export type ThreadSummary = z.infer<typeof ThreadSummarySchema>;
+export type ThreadTurn = z.infer<typeof ThreadTurnSchema>;

@@ -14,19 +14,31 @@
  *
  * Accounts without the Control mode get a 403 from the operation; that is a
  * normal answer for them, not an error, and the bell simply stays quiet.
+ *
+ * FINISHED RUNS ARE LISTED BUT NOT COUNTED
+ * A long run (Deep Research and friends) is started and then left — current
+ * agentic-UX guidance is explicit that such runs need "a notification system so
+ * the user can leave the surface and come back". They appear in the panel for 24
+ * hours, linked to their findings. They deliberately do NOT add to the badge:
+ * with no read state, a counted item would nag forever, and the badge would stop
+ * meaning "something is blocked on you" — which is the only thing that earns an
+ * interruption.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Bell } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { activitiesApi } from '@/api/client';
+import { activitiesApi, agentRunsApi } from '@/api/client';
 import { ApiError } from '@/api/http';
-import type { Activity } from '@/api/schemas';
+import type { Activity, AgentRun } from '@/api/schemas';
+import { agentFullLabel, LONG_RUNNING_AGENTS } from '@/lib/agentLabels';
 import { cn } from '@/lib/utils';
 
 /** Approvals are not push-delivered, so the count is refreshed on a slow poll. */
 const REFRESH_MS = 60_000;
 const MAX_SHOWN = 6;
+/** How long a finished run stays worth mentioning. */
+const FINISHED_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 function describe(item: Activity): string {
   const who = [item.firstName, item.lastName].filter(Boolean).join(' ')
@@ -49,6 +61,7 @@ function whenLabel(iso: string): string {
 
 export function NotificationsBell() {
   const [items, setItems] = useState<Activity[]>([]);
+  const [finished, setFinished] = useState<AgentRun[]>([]);
   const [open, setOpen] = useState(false);
   const [denied, setDenied] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -61,6 +74,19 @@ export function NotificationsBell() {
       // 403 means this role has no approvals surface — expected, stay quiet.
       if (err instanceof ApiError && err.status === 403) setDenied(true);
       setItems([]);
+    }
+
+    try {
+      const page = await agentRunsApi.list(1, 50);
+      const cutoff = Date.now() - FINISHED_WINDOW_MS;
+      setFinished(page.items.filter((r) => {
+        if (!LONG_RUNNING_AGENTS.has(r.agentType)) return false;
+        if (r.status !== 'completed' && r.status !== 'failed') return false;
+        const at = new Date(r.endedAt ?? r.startedAt).getTime();
+        return !Number.isNaN(at) && at >= cutoff;
+      }));
+    } catch {
+      setFinished([]);
     }
   }, []);
 
@@ -83,7 +109,7 @@ export function NotificationsBell() {
     };
   }, []);
 
-  if (denied) return null;
+  if (denied && finished.length === 0) return null;
 
   const count = items.length;
   const label = count === 0
@@ -122,7 +148,7 @@ export function NotificationsBell() {
             className="absolute right-0 top-[calc(100%+10px)] w-80 max-w-[calc(100vw-2rem)] bg-white dark:bg-[#0d1526] border border-slate-200 dark:border-white/[0.1] rounded-2xl shadow-xl shadow-slate-900/10 dark:shadow-black/50 z-[100] overflow-hidden"
           >
             <div className="px-4 py-2.5 border-b border-slate-100 dark:border-white/[0.06]">
-              <p className="text-[0.82rem] font-bold text-slate-900 dark:text-white">Waiting on you</p>
+              <p className="text-[0.82rem] font-bold text-slate-900 dark:text-white">Notifications</p>
             </div>
 
             {count === 0 ? (
@@ -157,6 +183,35 @@ export function NotificationsBell() {
                   {count > MAX_SHOWN ? `Review all ${count} approvals →` : 'Review approvals →'}
                 </Link>
               </>
+            )}
+
+            {finished.length > 0 && (
+              <div className="border-t border-slate-100 dark:border-white/[0.06]">
+                <p className="px-4 pt-2.5 pb-1 text-[0.72rem] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-600">
+                  Finished recently
+                </p>
+                <ul className="max-h-56 overflow-y-auto pb-1">
+                  {finished.slice(0, MAX_SHOWN).map((run) => (
+                    <li key={run.id}>
+                      <Link
+                        to={`/control-panel/${run.id}`}
+                        onClick={() => setOpen(false)}
+                        className="block px-4 py-2.5 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 transition-colors"
+                      >
+                        <p className="text-[0.82rem] font-medium text-slate-800 dark:text-slate-100 line-clamp-2">
+                          {typeof run.input?.goal === 'string' && run.input.goal.trim()
+                            ? String(run.input.goal)
+                            : agentFullLabel(run.agentType)}
+                        </p>
+                        <p className="text-[0.72rem] text-slate-400 dark:text-slate-600">
+                          {agentFullLabel(run.agentType)} · {run.status === 'failed' ? 'failed' : 'ready to read'}
+                          {' · '}{whenLabel(run.endedAt ?? run.startedAt)}
+                        </p>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
           </motion.div>
         )}

@@ -205,3 +205,64 @@ def get_morning_briefing(tenant_id: str) -> dict:
         },
         "timestamp": now.isoformat() + "Z",
     }
+
+
+def session_tools(tenant_id: str) -> list:
+    """Voice-session tools with workspace bound from the signed connection.
+
+    Nova Sonic would otherwise have to speak a tenant id; that must never be
+    model-supplied. The HTTP text path still uses the unbound tools above.
+    """
+    submit = submit_goal
+    pipeline = query_pipeline_status
+    calls = query_call_result
+    pending = list_pending_approvals
+    approve = approve_item
+    briefing = get_morning_briefing
+
+    @tool
+    def submit_spoken_goal(goal: str, contact_id: str = "") -> dict:
+        """Submit a spoken goal to the Coordinator for execution.
+        Use for queue a follow-up call, send an email, and similar asks."""
+        return submit(tenant_id, goal, contact_id)
+
+    @tool
+    def spoken_pipeline_status() -> dict:
+        """Spoken-friendly pipeline summary: deal count by stage and forecast."""
+        return pipeline(tenant_id)
+
+    @tool
+    def spoken_call_result(contact_name: str = "", limit: int = 5) -> dict:
+        """Look up recent call results by contact name or latest calls."""
+        return calls(tenant_id, contact_name, limit)
+
+    @tool
+    def spoken_pending_approvals() -> dict:
+        """List items currently in the Control Panel approval queue."""
+        return pending(tenant_id)
+
+    @tool
+    def spoken_approve_item(activity_id: str, confirmation: str = "") -> dict:
+        """Approve a low-risk queue item by voice. High-risk items stay in the Control Panel."""
+        return approve(tenant_id, activity_id, confirmation)
+
+    @tool
+    def spoken_morning_briefing() -> dict:
+        """Morning briefing: overnight agent work, stalled deals, approvals."""
+        return briefing(tenant_id)
+
+    @tool
+    def end_session(request_state: dict) -> str:
+        """End the voice conversation when the user says goodbye or stop."""
+        request_state["stop_event_loop"] = True
+        return "Goodbye."
+
+    return [
+        submit_spoken_goal,
+        spoken_pipeline_status,
+        spoken_call_result,
+        spoken_pending_approvals,
+        spoken_approve_item,
+        spoken_morning_briefing,
+        end_session,
+    ]

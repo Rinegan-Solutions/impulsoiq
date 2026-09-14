@@ -149,8 +149,11 @@ resource "aws_iam_role_policy" "agentcore_runtime" {
       {
         Sid    = "BedrockInvoke"
         Effect = "Allow"
-        Action = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream",
-        "bedrock:Converse", "bedrock:ConverseStream"]
+        Action = [
+          "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream",
+          "bedrock:InvokeModelWithBidirectionalStream",
+          "bedrock:Converse", "bedrock:ConverseStream",
+        ]
         Resource = "*"
       },
       {
@@ -225,9 +228,16 @@ resource "aws_iam_role_policy" "agentcore_runtime" {
           "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
           "dynamodb:Query", "dynamodb:DeleteItem",
         ]
+        # The reporting table belongs here even though no agent READS it: four
+        # runtimes are handed REPORTING_TABLE and write their finished report to
+        # it (deep-research, support-insight, forecasting-insight, data-hygiene).
+        # Omitting it did not fail loudly -- the agent caught the AccessDenied and
+        # wrote the IAM error into its own synthesis text, so every deep research
+        # run "completed" with its report silently unsaved.
         Resource = compact([
           var.dynamodb_table != "" ? "arn:aws:dynamodb:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:table/${var.dynamodb_table}" : "",
           var.metering_table != "" ? "arn:aws:dynamodb:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:table/${var.metering_table}" : "",
+          var.reporting_table != "" ? "arn:aws:dynamodb:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:table/${var.reporting_table}" : "",
         ])
       },
       {
@@ -368,6 +378,20 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
       SIGNAL_RATE_PAUSE_SECS     = "2.0"
     } : {},
   )
+
+  # Browser → AgentCore /ws cannot set handshake headers, so tenant/user ride
+  # as X-Amzn-Bedrock-AgentCore-Runtime-Custom-* query params on the presigned
+  # URL. Without the allowlist AgentCore strips them before the container sees
+  # the upgrade.
+  dynamic "request_header_configuration" {
+    for_each = each.key == "ambient-interface" ? [1] : []
+    content {
+      request_header_allowlist = [
+        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-TenantId",
+        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-UserId",
+      ]
+    }
+  }
 
   tags = merge(var.tags, { Agent = each.key })
 }

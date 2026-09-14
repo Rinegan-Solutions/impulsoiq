@@ -15,9 +15,14 @@
     "@aws-sdk/client-apigatewaymanagementapi": "^3.0.0",
     "@aws-sdk/client-bedrock-agentcore": "^3.0.0",
     "@aws-sdk/client-bedrock-runtime": "^3.0.0",
+    "@aws-sdk/client-lambda": "^3.0.0",
     "@aws-sdk/client-dynamodb": "^3.0.0",
     "@aws-sdk/client-ssm": "^3.0.0",
+    "@aws-sdk/credential-provider-node": "^3.0.0",
     "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-crypto/sha256-js": "^5.2.0",
+    "@smithy/protocol-http": "^5.0.0",
+    "@smithy/signature-v4": "^5.0.0",
     "jsonwebtoken": "^9.0.2",
     "jwks-rsa": "^3.1.0"
   }
