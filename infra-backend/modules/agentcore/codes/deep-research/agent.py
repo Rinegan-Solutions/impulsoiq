@@ -54,10 +54,12 @@ STRATEGY_CONFIGS = {
 You are a firmographic research specialist. Find companies that match our ideal customer
 profile based on revenue range, employee count, industry, and business stage.
 
-Use get_closed_won_profiles to understand our best customers, then
-search_public_signals to find similar companies. Write findings to session memory.
+Use get_closed_won_profiles to understand our best customers. If profiles
+are empty, treat the research goal itself as the ICP. Then ALWAYS call
+search_public_signals. Write every returned company to session memory.
 
 Output 5-8 high-confidence company matches with specific reasons why each fits.
+Never invent a company that was not in tool results.
 """.strip(),
     },
     "technographic": {
@@ -66,10 +68,12 @@ Output 5-8 high-confidence company matches with specific reasons why each fits.
 You are a technographic research specialist. Find companies that use similar technologies
 or face the same operational challenges as our best customers.
 
-Use get_closed_won_profiles to understand the tech context, then search_public_signals
-with technographic queries. Write findings to session memory.
+Use get_closed_won_profiles for tech context. If it is empty, search from
+the research goal. Then ALWAYS call search_public_signals with technographic
+queries. Write every returned company to session memory.
 
 Output 5-8 matches with specific technology signals for each.
+Never invent a company that was not in tool results.
 """.strip(),
     },
     "news_signals": {
@@ -79,9 +83,11 @@ You are a signals-based research specialist. Find companies with recent positive
 Series A/B funding, rapid hiring in sales/engineering, new product launches, or
 expansion announcements — these indicate active buying intent and budget availability.
 
-Use search_public_signals with news and signal queries. Write findings to session memory.
+Use search_public_signals with news and signal queries. Write every returned
+company to session memory even if other tools reported a gap.
 
 Output 5-8 matches with specific signal events and recency.
+Never invent a company that was not in tool results.
 """.strip(),
     },
     "lookalike": {
@@ -91,10 +97,12 @@ You are a lookalike modelling specialist. Identify companies that most closely r
 the profile of deals we have already closed and won — use our closed-won deal history
 as the gold standard and find companies with the highest pattern similarity.
 
-Use get_closed_won_profiles as the baseline, then search_public_signals for matches.
-Write findings to session memory.
+Use get_closed_won_profiles as the baseline. If it is empty, use accounts
+in the workspace and the research goal as the pattern, then still call
+search_public_signals. Write every returned company to session memory.
 
 Output 5-8 ranked lookalike matches with similarity score and reasoning.
+Never invent a company that was not in tool results.
 """.strip(),
     },
 }
@@ -193,10 +201,15 @@ Ranking criteria:
 2. Within a strategy, higher confidence findings rank higher
 3. Include the strategies that surfaced each company so the user understands provenance
 
+If some strategies wrote empty findings because of a gap, still rank every
+company that DID come back. Do not conclude "0 companies" when session memory
+contains any company_name.
+
 Output a ranked list of 10-15 companies with:
   { rank, company, reasons: list, strategies: list, confidence }
 
 Then call write_research_report to persist the output.
+Never invent companies that were not in session memory.
 """.strip(),
         tools = [read_session_memory, write_research_report],
     )

@@ -30,6 +30,7 @@ type Operation =
   | 'get_active_campaigns'
   | 'get_tenant'               // Phase 3: needed for metering quota (returns tier)
   | 'get_pipeline_data'        // Phase 3: deals + stages for forecasting agent
+  | 'list_closed_won_deals'    // Deep research lookalike baseline (includes Closed Won)
   | 'get_deal_activity_ages'   // Phase 3: days-in-stage for anomaly detection
   | 'scan_for_duplicates'      // Phase 3: fuzzy-match candidates for hygiene agent
   | 'get_workspace_templates'  // Phase 5: active templates for a tenant
@@ -395,6 +396,26 @@ const dispatch: Handler<
            GROUP  BY d.id
            ORDER  BY d.amount DESC`,
           [tenantId],
+        );
+        return { result: r.rows };
+      }
+
+      case 'list_closed_won_deals': {
+        // Lookalike research. get_pipeline_data is the forecasting view and
+        // EXCLUDES Closed Won, so that operation can never be the baseline.
+        const limit = Math.min(50, Math.max(1, Number(payload.limit ?? 20)));
+        const r = await db.query(
+          `SELECT d.id, d.name, d.stage, d.amount, d.probability, d.close_date,
+                  d.created_at, d.updated_at,
+                  acc.id AS account_id, acc.name AS account_name, acc.domain,
+                  acc.industry, acc.website, acc.employee_count, acc.annual_revenue
+           FROM   deal d
+           LEFT   JOIN account acc ON acc.id = d.account_id AND acc.tenant_id = d.tenant_id
+           WHERE  d.tenant_id = $1
+             AND  d.stage = 'Closed Won'
+           ORDER  BY d.close_date DESC NULLS LAST, d.amount DESC
+           LIMIT  $2`,
+          [tenantId, limit],
         );
         return { result: r.rows };
       }

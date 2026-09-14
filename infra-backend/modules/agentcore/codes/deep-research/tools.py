@@ -12,13 +12,26 @@ import json
 import os
 import datetime
 import boto3
-import httpx
 from strands import tool
 
 from impulsoiq_secrets import app_secret
+from .research_search import licensed_search, search_companies
+
+from decimal import Decimal
 
 _lambda = boto3.client("lambda", region_name=os.environ.get("AWS_REGION", "eu-west-2"))
 _dynamo = boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION", "eu-west-2"))
+
+
+def _ddb_safe(value):
+    """DynamoDB rejects Python float; nested findings always carry confidence."""
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, dict):
+        return {k: _ddb_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_ddb_safe(v) for v in value]
+    return value
 
 
 def _read(op: str, payload: dict, tenant_id: str) -> dict:
@@ -70,15 +83,15 @@ def write_to_session_memory(
     now   = datetime.datetime.utcnow().isoformat() + "Z"
     ttl   = int(datetime.datetime.utcnow().timestamp()) + 86_400  # 24-hour TTL
 
-    table.put_item(Item={
+    table.put_item(Item=_ddb_safe({
         "pk":        f"{tenant_id}#research#{session_id}",
         "sk":        f"{now}#{strategy}",
         "strategy":  strategy,
-        "findings":  findings,
+        "findings":  findings if isinstance(findings, list) else [],
         "confidence": str(confidence),
         "writtenAt": now,
         "ttl":       ttl,
-    })
+    }))
     return {"ok": True, "strategy": strategy, "findingsCount": len(findings)}
 
 
@@ -87,12 +100,35 @@ def write_to_session_memory(
 @tool
 def get_closed_won_profiles(tenant_id: str, limit: int = 20) -> dict:
     """
-    Read the profiles of closed-won deals from DSQL.
-    Used by all sub-agents as the 'ideal customer' baseline.
-    Returns company names, industries, sizes, and deal values.
+    Read closed-won deals (with account industry/size) plus existing accounts.
+
+    Do NOT use get_pipeline_data for this — that view excludes Closed Won.
+    Empty closed-won history is a gap, not a hard stop: still search from the
+    research goal and from accounts already in the workspace.
     """
-    deals = _read("get_pipeline_data", {"stage": "Closed Won", "lookbackDays": 365}, tenant_id)
-    return {"profiles": (deals.get("result") or [])[:limit]}
+    deals = _read("list_closed_won_deals", {"limit": limit}, tenant_id)
+    accounts = _read("list_accounts", {"page": 1, "pageSize": min(limit, 20)}, tenant_id)
+    profiles = deals.get("result") if isinstance(deals.get("result"), list) else []
+    account_items = (accounts.get("result") or {})
+    if isinstance(account_items, dict):
+        account_items = account_items.get("items") or []
+    if not isinstance(account_items, list):
+        account_items = []
+    gap = ""
+    if deals.get("ok") is False:
+        gap = str(deals.get("error") or "closed_won_read_failed")
+    elif not profiles:
+        gap = "no_closed_won"
+    return {
+        "profiles": profiles[:limit],
+        "accounts": account_items[:limit],
+        "gap": gap,
+        "message": (
+            "No closed-won deals yet. Use the research goal and existing accounts "
+            "as the ICP, then search_public_signals — do not return empty findings."
+            if gap == "no_closed_won" else ""
+        ),
+    }
 
 
 def _stub_allowed() -> bool:
@@ -113,8 +149,11 @@ def _search_provider() -> tuple[str, str]:
     url = (os.environ.get("RESEARCH_SEARCH_API_URL", "")
            or os.environ.get("ENRICHMENT_API_URL", "")).rstrip("/")
     key = (os.environ.get("RESEARCH_SEARCH_API_KEY", "")
-           or os.environ.get("ENRICHMENT_API_KEY", "")
-           or app_secret("enrichment_api_key"))
+           or os.environ.get("ENRICHMENT_API_KEY", "")).strip()
+    # Only open Secrets Manager when a URL exists and env did not already
+    # supply a key. An empty secret (no AWSCURRENT) must not crash the tool.
+    if url and not key:
+        key = app_secret("enrichment_api_key")
     return url, key
 
 
@@ -125,60 +164,64 @@ def search_public_signals(
     limit:    int = 10,
 ) -> dict:
     """
-    Search for companies matching a research query using a licensed provider.
+    Find real companies matching a research query.
 
-    strategy: describes what signal type to look for
-              ('firmographic_match', 'technographic_match', 'news_signal', 'lookalike')
+    Order: licensed /search endpoint (if configured) → Wikipedia / Wikidata /
+    GDELT (public, cited) → Nova web grounding (US) → off-prod stub last.
 
-    Returns { results: [...], query, strategy, source } when a provider answers.
-    When no provider is configured this returns an EMPTY result list and a
-    human-visible `gap` — never invented company names. If you receive a gap,
-    say so in your findings instead of naming companies.
+    strategy: 'firmographic_match' | 'technographic_match' | 'news_signal' | 'lookalike'
+
+    Always write whatever companies come back to session memory. An empty
+    closed-won list is not a reason to skip this tool.
     """
+    cap = max(1, min(int(limit or 10), 15))
     url, key = _search_provider()
-    gap = ""
+    licensed = licensed_search(url, key, query, strategy, cap) if url and key else []
+    public, tried = search_companies(query, strategy, cap)
+    results = []
+    seen: set[str] = set()
+    for row in licensed + public:
+        name = (row.get("company") or "").strip().lower()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        results.append(row)
+        if len(results) >= cap:
+            break
 
-    if url and key:
-        try:
-            resp = httpx.post(
-                f"{url}/search",
-                json={"query": query, "strategy": strategy, "limit": limit},
-                headers={"X-API-Key": key},
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                results = resp.json().get("results", [])
-                return {
-                    "results": results[:limit] if isinstance(results, list) else [],
-                    "query": query,
-                    "strategy": strategy,
-                    "source": "search_api",
-                }
-            gap = f"provider_http_{resp.status_code}"
-        except Exception as exc:
-            gap = f"provider_error:{type(exc).__name__}"
-    elif _stub_allowed():
+    if results:
+        return {
+            "results": results,
+            "query": query,
+            "strategy": strategy,
+            "source": ",".join(dict.fromkeys(
+                [r.get("source") for r in results if r.get("source")] + tried
+            )),
+            "count": len(results),
+        }
+
+    if _stub_allowed():
         return {
             "results": [
-                {"company": f"Company {i+1} (via {strategy})", "source": "research_stub",
-                 "signal": query, "confidence": round(0.9 - i * 0.08, 2)}
-                for i in range(min(limit, 5))
+                {"company": f"Company {i+1} (via {strategy})", "company_name": f"Company {i+1} (via {strategy})",
+                 "source": "research_stub", "signal": query, "reason": query,
+                 "confidence": round(0.9 - i * 0.08, 2)}
+                for i in range(min(cap, 5))
             ],
             "query": query,
             "strategy": strategy,
             "isStub": True,
         }
-    else:
-        gap = "no_research_provider"
 
     return {
         "results": [],
         "query": query,
         "strategy": strategy,
-        "gap": gap,
+        "sourcesTried": tried,
+        "gap": "no_research_results",
         "message": (
-            "No company-search provider is configured for this environment, so no "
-            "companies can be named. Report this gap instead of guessing."
+            "Public search returned no citable companies for this query. "
+            "Say so in findings — do not invent names."
         ),
     }
 
@@ -199,34 +242,26 @@ def write_research_report(
     ranked_companies: list of { rank, company_name, reasons: list, sources: list, confidence }
     methodology:      plain-text explanation of how results were derived
     """
-    import boto3 as _boto3
     reporting = _dynamo.Table(os.environ.get("REPORTING_TABLE", ""))
     now       = datetime.datetime.utcnow().isoformat() + "Z"
     ttl       = int(datetime.datetime.utcnow().timestamp()) + 30 * 86_400  # 30-day TTL
+    companies = ranked_companies if isinstance(ranked_companies, list) else []
 
-    reporting.put_item(Item={
+    body = _ddb_safe({
         "pk":               f"{tenant_id}#report#deep_research",
         "sk":               now,
         "report_type":      "deep_research",
         "tenant_id":        tenant_id,
         "sessionId":        session_id,
         "goal":             goal,
-        "rankedCompanies":  ranked_companies,
+        "rankedCompanies":  companies,
         "methodology":      methodology,
-        "costTokens":       cost_tokens,
+        "costTokens":       int(cost_tokens or 0),
         "generatedAt":      now,
         "ttl":              ttl,
     })
-    # Latest pointer
-    reporting.put_item(Item={
-        "pk":              f"{tenant_id}#report#deep_research",
-        "sk":              "latest",
-        "report_type":     "deep_research",
-        "tenant_id":       tenant_id,
-        "sessionId":       session_id,
-        "goal":            goal,
-        "rankedCompanies": ranked_companies,
-        "generatedAt":     now,
-        "ttl":             ttl,
-    })
-    return {"ok": True, "reportWritten": True, "companyCount": len(ranked_companies)}
+    reporting.put_item(Item=body)
+    latest = dict(body)
+    latest["sk"] = "latest"
+    reporting.put_item(Item=latest)
+    return {"ok": True, "reportWritten": True, "companyCount": len(companies)}

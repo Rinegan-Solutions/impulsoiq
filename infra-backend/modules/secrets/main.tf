@@ -1,6 +1,10 @@
 # One JSON secret per environment. Keys are packed here so we do not pay
 # for (or rotate) a secret per vendor. Terraform creates the container;
 # operators put values in. Terraform never writes a secret version.
+#
+# Until a version exists, GetSecretValue fails with ResourceNotFoundException
+# for staging label AWSCURRENT. Readers (impulsoiq_secrets / Lambda secrets.ts)
+# treat that as empty keys, not a crash.
 
 resource "aws_secretsmanager_secret" "app" {
   name        = "${var.project}/${var.env}/app"

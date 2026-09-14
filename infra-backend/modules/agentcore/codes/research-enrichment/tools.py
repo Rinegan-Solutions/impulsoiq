@@ -328,11 +328,21 @@ def _providers() -> list[tuple[str, str, str]]:
     """(id, url, key) for A then B then C. A aliases the legacy ENRICHMENT_API_* vars."""
     specs = [
         ("A", os.environ.get("ENRICHMENT_PROVIDER_A_URL") or os.environ.get("ENRICHMENT_API_URL", ""),
-              os.environ.get("ENRICHMENT_PROVIDER_A_KEY") or os.environ.get("ENRICHMENT_API_KEY", "") or app_secret("enrichment_api_key")),
-        ("B", os.environ.get("ENRICHMENT_PROVIDER_B_URL", ""), os.environ.get("ENRICHMENT_PROVIDER_B_KEY", "") or app_secret("enrichment_provider_b_key")),
-        ("C", os.environ.get("ENRICHMENT_PROVIDER_C_URL", ""), os.environ.get("ENRICHMENT_PROVIDER_C_KEY", "") or app_secret("enrichment_provider_c_key")),
+         os.environ.get("ENRICHMENT_PROVIDER_A_KEY") or os.environ.get("ENRICHMENT_API_KEY", ""),
+         "enrichment_api_key"),
+        ("B", os.environ.get("ENRICHMENT_PROVIDER_B_URL", ""),
+         os.environ.get("ENRICHMENT_PROVIDER_B_KEY", ""),
+         "enrichment_provider_b_key"),
+        ("C", os.environ.get("ENRICHMENT_PROVIDER_C_URL", ""),
+         os.environ.get("ENRICHMENT_PROVIDER_C_KEY", ""),
+         "enrichment_provider_c_key"),
     ]
-    return [(i, u, k) for i, u, k in specs if u]
+    out: list[tuple[str, str, str]] = []
+    for pid, url, key, secret_name in specs:
+        if not url:
+            continue
+        out.append((pid, url, (key or "").strip() or app_secret(secret_name)))
+    return out
 
 
 def _provider_call(provider_id: str, email: str, domain: str) -> dict:

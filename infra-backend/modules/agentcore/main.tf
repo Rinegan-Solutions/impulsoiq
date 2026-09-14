@@ -153,6 +153,7 @@ resource "aws_iam_role_policy" "agentcore_runtime" {
           "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream",
           "bedrock:InvokeModelWithBidirectionalStream",
           "bedrock:Converse", "bedrock:ConverseStream",
+          "bedrock:InvokeTool",
         ]
         Resource = "*"
       },
@@ -365,10 +366,12 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
     } : {},
     each.key == "deep-research" ? {
       REPORTING_TABLE = var.reporting_table
-      # Company search. Without a provider the agent reports a gap rather than
-      # naming invented companies; the stub is impossible in prod.
-      RESEARCH_SEARCH_API_URL = var.enrichment_api_url
-      ALLOW_RESEARCH_STUB     = var.env == "prod" ? "false" : "true"
+      # Licensed contact-enrichment URLs are not a company-search API. Public
+      # Wikipedia/Wikidata/GDELT plus Nova web grounding (US) fill that gap.
+      RESEARCH_SEARCH_API_URL     = var.enrichment_api_url
+      RESEARCH_GROUNDING_REGION   = "us-east-1"
+      RESEARCH_GROUNDING_MODEL    = "us.amazon.nova-2-lite-v1:0"
+      ALLOW_RESEARCH_STUB         = var.env == "prod" ? "false" : "true"
     } : {},
     each.key == "signal-listening" ? {
       # Stage 1 Nova Micro token budget (hard-coded cap, not agent-discretionary)
