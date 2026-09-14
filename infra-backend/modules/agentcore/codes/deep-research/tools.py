@@ -10,6 +10,7 @@ calls are tracked by the metering-aggregator.
 """
 import json
 import os
+import re
 import datetime
 import boto3
 from strands import tool
@@ -34,13 +35,40 @@ def _ddb_safe(value):
     return value
 
 
+def _lambda_json(resp) -> dict:
+    raw = json.loads(resp["Payload"].read())
+    if resp.get("FunctionError"):
+        raise RuntimeError(str(raw))
+    if isinstance(raw, dict) and isinstance(raw.get("body"), str):
+        try:
+            raw = json.loads(raw["body"])
+        except json.JSONDecodeError:
+            pass
+    return raw if isinstance(raw, dict) else {}
+
+
 def _read(op: str, payload: dict, tenant_id: str) -> dict:
     resp = _lambda.invoke(
         FunctionName   = os.environ["CRM_READ_SERVICE_ARN"],
         InvocationType = "RequestResponse",
         Payload        = json.dumps({"operation": op, "payload": payload, "tenantId": tenant_id}).encode(),
     )
-    return json.loads(resp["Payload"].read())
+    return _lambda_json(resp)
+
+
+def _write(op: str, payload: dict, tenant_id: str) -> dict:
+    resp = _lambda.invoke(
+        FunctionName   = os.environ["CRM_WRITE_SERVICE_ARN"],
+        InvocationType = "RequestResponse",
+        Payload        = json.dumps({
+            "operation": op,
+            "payload": payload,
+            "tenantId": tenant_id,
+            "actorType": "agent",
+            "actorId": "deep-research-agent",
+        }).encode(),
+    )
+    return _lambda_json(resp)
 
 
 # ── Session memory — shared scratch-space across all sub-agents ───────────────
@@ -226,6 +254,236 @@ def search_public_signals(
     }
 
 
+def _plain(value):
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    return value
+
+
+def _norm_company_name(name: str) -> str:
+    text = re.sub(r"\s+", " ", (name or "").strip())
+    text = re.sub(r"\s*\(company\)\s*$", "", text, flags=re.I)
+    return text.strip()
+
+
+def _name_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _norm_company_name(name).lower())
+
+
+def _guess_industry(blob: str) -> str | None:
+    text = (blob or "").lower()
+    if any(w in text for w in ("ehr", "emr", "healthtech", "health care", "healthcare", "hospital")):
+        return "Healthcare"
+    if any(w in text for w in ("fintech", "financial", "banking", "payments")):
+        return "Financial services"
+    if any(w in text for w in ("fmcg", "consumer products", "cpg")):
+        return "FMCG"
+    if any(w in text for w in ("supply chain", "logistics", "scm")):
+        return "Supply chain"
+    if any(w in text for w in ("saas", "software", "cloud")):
+        return "Software / SaaS"
+    return None
+
+
+def _as_list(value) -> list:
+    if isinstance(value, list):
+        return value
+    if value in (None, ""):
+        return []
+    return [value]
+
+
+def _company_from_finding(item, rank: int) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    name = _norm_company_name(str(
+        item.get("company_name") or item.get("company") or item.get("name") or ""
+    ))
+    if len(name) < 2:
+        return None
+    reasons = _as_list(item.get("reasons") or item.get("reason"))
+    strategies = _as_list(item.get("strategies") or item.get("strategy"))
+    sources = _as_list(item.get("sources") or item.get("source"))
+    url = str(item.get("url") or item.get("website") or "")
+    try:
+        confidence = float(item.get("confidence") or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    try:
+        rank_n = int(item.get("rank") or rank)
+    except (TypeError, ValueError):
+        rank_n = rank
+    return {
+        "rank": rank_n,
+        "name": name,
+        "reasons": [str(r) for r in reasons if r],
+        "strategies": [str(s) for s in strategies if s],
+        "sources": [str(s) for s in sources if s],
+        "url": url,
+        "confidence": confidence,
+        "industry": item.get("industry"),
+    }
+
+
+def _ranked_from_session(tenant_id: str, session_id: str) -> list[dict]:
+    memory = read_session_memory(tenant_id, session_id)
+    rows = memory.get("findings") if isinstance(memory, dict) else []
+    collected: list[dict] = []
+    seen: set[str] = set()
+    if not isinstance(rows, list):
+        return []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        strategy = str(row.get("strategy") or "")
+        findings = row.get("findings") if isinstance(row.get("findings"), list) else []
+        for finding in findings:
+            company = _company_from_finding(finding, len(collected) + 1)
+            if not company:
+                continue
+            key = _name_key(company["name"])
+            if key in seen:
+                existing = next(c for c in collected if _name_key(c["name"]) == key)
+                if strategy and strategy not in existing["strategies"]:
+                    existing["strategies"].append(strategy)
+                continue
+            seen.add(key)
+            if strategy:
+                company["strategies"] = list(dict.fromkeys([*company["strategies"], strategy]))
+            collected.append(company)
+    return collected
+
+
+def persist_research_accounts(
+    tenant_id: str,
+    session_id: str,
+    goal: str,
+    ranked_companies: list | None = None,
+) -> dict:
+    """
+    Upsert each researched company as a CRM account (Companies list).
+
+    Names come from search/synthesis — never invented here. Matching is by
+    normalised name so a second Swarm does not duplicate Epic Systems.
+    People/contacts are not created: the swarm returns companies, not humans.
+    """
+    ranked = [
+        c for c in (_company_from_finding(item, i + 1) for i, item in enumerate(ranked_companies or []))
+        if c
+    ]
+    if not ranked:
+        ranked = _ranked_from_session(tenant_id, session_id)
+    if not ranked:
+        return {"savedCount": 0, "accounts": [], "gap": "no_companies_to_persist"}
+
+    saved: list[dict] = []
+    errors: list[str] = []
+    for company in ranked:
+        name = company["name"]
+        try:
+            search = _read("list_accounts", {"page": 1, "pageSize": 20, "search": name[:80]}, tenant_id)
+            result = search.get("result") if isinstance(search, dict) else {}
+            items = result.get("items") if isinstance(result, dict) else []
+            if not isinstance(items, list):
+                items = []
+            existing = next(
+                (row for row in items if isinstance(row, dict) and _name_key(str(row.get("name") or "")) == _name_key(name)),
+                None,
+            )
+            prior_enr = {}
+            prior_custom = {}
+            account_id = None
+            domain = None
+            industry = company.get("industry") if isinstance(company.get("industry"), str) else None
+            website = company["url"] if str(company.get("url") or "").startswith("http") else None
+            if existing:
+                account_id = str(existing.get("id") or "")
+                domain = existing.get("domain")
+                industry = existing.get("industry") or industry
+                website = existing.get("website") or website
+                prior_enr = existing.get("enrichment_json") or existing.get("enrichmentJson") or {}
+                prior_custom = existing.get("custom_fields") or existing.get("customFields") or {}
+                if not isinstance(prior_enr, dict):
+                    prior_enr = {}
+                if not isinstance(prior_custom, dict):
+                    prior_custom = {}
+            if not industry:
+                blob = " ".join([
+                    name,
+                    goal,
+                    " ".join(company["reasons"]),
+                    " ".join(company["strategies"]),
+                ])
+                industry = _guess_industry(blob)
+
+            enrichment = {
+                **_plain(prior_enr),
+                "deepResearch": {
+                    "sessionId": session_id,
+                    "rank": company["rank"],
+                    "confidence": company["confidence"],
+                    "reasons": company["reasons"],
+                    "strategies": company["strategies"],
+                    "sources": company["sources"],
+                    "goal": goal,
+                    "url": company.get("url") or "",
+                },
+            }
+            payload = {
+                "name": name,
+                "domain": domain,
+                "industry": industry,
+                "website": website,
+                "enrichmentJson": enrichment,
+                "customFields": {**_plain(prior_custom), "origin": "deep_research"},
+            }
+            if account_id:
+                payload["id"] = account_id
+            written = _write("upsert_account", payload, tenant_id)
+            new_id = str(written.get("id") or account_id or "")
+            if not new_id or written.get("ok") is False:
+                errors.append(f"{name}: {written.get('error') or 'write failed'}")
+                continue
+            prior_dr = prior_enr.get("deepResearch") if isinstance(prior_enr.get("deepResearch"), dict) else {}
+            if str(prior_dr.get("sessionId") or "") != session_id:
+                _write("upsert_activity", {
+                    "accountId": new_id,
+                    "type": "note",
+                    "actorType": "agent",
+                    "actorId": "deep-research-agent",
+                    "subject": f"Deep research: {name}",
+                    "body": (
+                        f"Added from Deep Research.\n"
+                        f"Goal: {goal}\n"
+                        f"Rank: {company['rank']}\n"
+                        + (f"Why: {'; '.join(company['reasons'][:4])}\n" if company["reasons"] else "")
+                    ),
+                    "metadata": {
+                        "source": "deep_research",
+                        "sessionId": session_id,
+                        "rank": company["rank"],
+                    },
+                }, tenant_id)
+            saved.append({
+                "id": new_id,
+                "name": name,
+                "rank": company["rank"],
+                "created": not bool(account_id),
+            })
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+
+    return {
+        "savedCount": len(saved),
+        "accounts": saved,
+        "errors": errors,
+    }
+
+
 @tool
 def write_research_report(
     tenant_id:    str,
@@ -246,6 +504,8 @@ def write_research_report(
     now       = datetime.datetime.utcnow().isoformat() + "Z"
     ttl       = int(datetime.datetime.utcnow().timestamp()) + 30 * 86_400  # 30-day TTL
     companies = ranked_companies if isinstance(ranked_companies, list) else []
+    if not companies:
+        companies = _ranked_from_session(tenant_id, session_id)
 
     body = _ddb_safe({
         "pk":               f"{tenant_id}#report#deep_research",
@@ -264,4 +524,15 @@ def write_research_report(
     latest = dict(body)
     latest["sk"] = "latest"
     reporting.put_item(Item=latest)
-    return {"ok": True, "reportWritten": True, "companyCount": len(companies)}
+    try:
+        crm = persist_research_accounts(tenant_id, session_id, goal, companies)
+    except Exception as exc:
+        crm = {"savedCount": 0, "accounts": [], "errors": [str(exc)]}
+    return {
+        "ok": True,
+        "reportWritten": True,
+        "companyCount": len(companies),
+        "crmSaved": crm.get("savedCount", 0),
+        "accounts": crm.get("accounts", []),
+        "crmErrors": crm.get("errors") or [],
+    }

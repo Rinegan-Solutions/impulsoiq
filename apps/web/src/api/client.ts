@@ -74,7 +74,14 @@ export const accountsApi = {
   get: (id: string) =>
     operation('/crm-read', 'get_account', { id }, AccountSchema.nullable()),
 
-  create: (body: { name: string; domain?: string; industry?: string }) =>
+  create: (body: {
+    name: string;
+    domain?: string;
+    industry?: string;
+    website?: string;
+    customFields?: Record<string, unknown>;
+    enrichmentJson?: Record<string, unknown>;
+  }) =>
     operation('/crm-write', 'upsert_account', body, OkSchema),
 
   activity: (accountId: string, page = 1, pageSize = 40) =>

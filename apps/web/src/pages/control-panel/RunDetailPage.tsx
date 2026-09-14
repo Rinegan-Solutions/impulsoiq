@@ -20,7 +20,7 @@
  * A run that is still going keeps polling, so this page is equally the "watch
  * it" surface and the "read it afterwards" surface — the same URL either way.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { ArrowLeft, Check, ChevronRight, Copy, Loader2, TriangleAlert } from 'lucide-react';
@@ -29,6 +29,8 @@ import { SEO } from '@/components/SEO';
 import { agentRunsApi } from '@/api/client';
 import type { AgentRun } from '@/api/schemas';
 import { agentFullLabel } from '@/lib/agentLabels';
+import { Markdown } from '@/components/app/Markdown';
+import { parseResearchCompanyNames, saveResearchCompaniesToCrm } from '@/lib/researchCompanies';
 import { cn } from '@/lib/utils';
 
 const ease = [0.22, 1, 0.36, 1] as const;
@@ -56,19 +58,9 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-/** Paragraph-preserving plain text. The agents emit prose with **bold** markers
- *  and lists; this keeps the line breaks rather than collapsing them, without
- *  pulling in a markdown renderer and its sanitisation burden. */
+/** Paragraph-preserving markdown from agent output. HTML is not rendered. */
 function Prose({ text }: { text: string }) {
-  return (
-    <div className="space-y-2">
-      {text.split(/\n{2,}/).map((para, i) => (
-        <p key={i} className="text-[0.86rem] leading-relaxed text-slate-700 dark:text-slate-300 whitespace-pre-wrap">
-          {para}
-        </p>
-      ))}
-    </div>
-  );
+  return <Markdown text={text} />;
 }
 
 function Disclosure({
@@ -142,11 +134,22 @@ function CopyId({ id }: { id: string }) {
 
 interface SubAgentResult { strategy?: string; status?: string; result?: string }
 
-function DeepResearchOutput({ output }: { output: Record<string, unknown> }) {
+function DeepResearchOutput({
+  output,
+  crmAccounts,
+  savingCompanies,
+  saveError,
+}: {
+  output: Record<string, unknown>;
+  crmAccounts: Array<{ id?: string; name?: string; rank?: number }>;
+  savingCompanies: boolean;
+  saveError: string;
+}) {
   const synthesis = str(output.synthesis);
   const results = Array.isArray(output.subAgentResults)
     ? (output.subAgentResults as SubAgentResult[])
     : [];
+  const saved = crmAccounts;
 
   return (
     <div className="space-y-4">
@@ -158,6 +161,45 @@ function DeepResearchOutput({ output }: { output: Record<string, unknown> }) {
           <div className="rounded-2xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#0d1526] px-4 py-3.5">
             <Prose text={synthesis} />
           </div>
+        </section>
+      )}
+
+      {savingCompanies && (
+        <p className="flex items-center gap-2 text-[0.82rem] text-slate-500 dark:text-slate-400">
+          <Loader2 size={14} className="animate-spin" />
+          Saving companies to CRM…
+        </p>
+      )}
+      {saveError && (
+        <p className="text-[0.82rem] text-amber-700 dark:text-amber-300">{saveError}</p>
+      )}
+
+      {saved.length > 0 && (
+        <section>
+          <h2 className="text-[0.78rem] font-bold uppercase tracking-wide text-slate-400 dark:text-slate-600 mb-2">
+            Added to Companies ({saved.length})
+          </h2>
+          <ul className="rounded-2xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#0d1526] divide-y divide-slate-100 dark:divide-white/[0.05]">
+            {saved.map((row, i) => {
+              const name = str(row.name) || `Company ${i + 1}`;
+              const href = row.id ? `/accounts/${row.id}` : '/accounts';
+              return (
+                <li key={row.id || `${name}-${i}`}>
+                  <Link
+                    to={href}
+                    className="flex items-center justify-between gap-3 px-4 py-2.5 text-[0.84rem] hover:bg-slate-50 dark:hover:bg-white/[0.03]"
+                  >
+                    <span className="min-w-0 truncate font-medium text-slate-800 dark:text-slate-200">
+                      {typeof row.rank === 'number' ? `${row.rank}. ` : ''}{name}
+                    </span>
+                    <span className="flex-shrink-0 text-indigo-600 dark:text-indigo-400 font-semibold">
+                      Open
+                    </span>
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
         </section>
       )}
 
@@ -201,6 +243,10 @@ export default function RunDetailPage() {
   const [run, setRun] = useState<AgentRun | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [importedAccounts, setImportedAccounts] = useState<Array<{ id: string; name: string }>>([]);
+  const [savingCompanies, setSavingCompanies] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const importStarted = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -226,6 +272,28 @@ export default function RunDetailPage() {
   const hasOutput = output != null && Object.keys(output).length > 0;
   const isDeepResearch = run?.agentType === 'deep_research';
   const goal = str(run?.input?.goal) || str(output?.goal);
+  const agentSaved = Array.isArray(output?.crmAccounts)
+    ? (output?.crmAccounts as Array<{ id?: string; name?: string; rank?: number }>)
+    : [];
+  const crmAccounts = agentSaved.length > 0 ? agentSaved : importedAccounts;
+
+  useEffect(() => {
+    if (!run || !output || !isDeepResearch || run.status !== 'completed') return;
+    if (agentSaved.length > 0) return;
+    if (importStarted.current === run.id) return;
+    const names = parseResearchCompanyNames(str(output.synthesis));
+    if (names.length === 0) return;
+    importStarted.current = run.id;
+    setSavingCompanies(true);
+    setSaveError('');
+    void saveResearchCompaniesToCrm(names, {
+      goal: str(output.goal) || str(run.input?.goal),
+      sessionId: str(output.sessionId),
+    })
+      .then((rows) => setImportedAccounts(rows))
+      .catch((err) => setSaveError(err instanceof Error ? err.message : 'Could not save companies.'))
+      .finally(() => setSavingCompanies(false));
+  }, [run, output, isDeepResearch, agentSaved.length]);
 
   return (
     <AppShell>
@@ -291,7 +359,14 @@ export default function RunDetailPage() {
             )}
 
             <div className="mt-5 space-y-4">
-              {hasOutput && isDeepResearch && <DeepResearchOutput output={output} />}
+              {hasOutput && isDeepResearch && (
+                <DeepResearchOutput
+                  output={output}
+                  crmAccounts={crmAccounts}
+                  savingCompanies={savingCompanies}
+                  saveError={saveError}
+                />
+              )}
 
               {hasOutput && !isDeepResearch && (
                 <section>

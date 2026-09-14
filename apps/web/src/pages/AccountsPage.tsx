@@ -111,7 +111,8 @@ export default function AccountsPage() {
             <div className="py-16 text-center text-[0.84rem] text-slate-400 dark:text-slate-600">Loading companies…</div>
           ) : accounts.length === 0 ? (
             <div className="py-16 text-center text-[0.84rem] text-slate-400 dark:text-slate-600">
-              No companies yet. <Link to="/home?intent=compose" className="text-indigo-600 font-semibold">Start from Home</Link>
+              No companies yet. Add one, import a CSV, or run{' '}
+              <Link to="/research" className="text-indigo-600 font-semibold">Deep Research</Link>.
             </div>
           ) : accounts.map((acc, i) => (
             <Link
@@ -126,7 +127,12 @@ export default function AccountsPage() {
                 </div>
                 <div className="min-w-0">
                   <p className="font-semibold text-slate-800 dark:text-slate-200 truncate">{acc.name}</p>
-                  <p className="text-[0.7rem] text-slate-400 dark:text-slate-600">{acc.domain ?? `${acc.contactCount ?? 0} contacts`}</p>
+                  <p className="text-[0.7rem] text-slate-400 dark:text-slate-600">
+                    {acc.domain ?? `${acc.contactCount ?? 0} contacts`}
+                    {(acc.customFields?.origin === 'deep_research' || acc.enrichmentJson?.deepResearch) ? (
+                      <span className="ml-1.5 text-indigo-500 dark:text-indigo-400">· Research</span>
+                    ) : null}
+                  </p>
                 </div>
               </div>
               <span className="text-[0.75rem] bg-slate-100 dark:bg-white/[0.07] text-slate-600 dark:text-slate-400 px-2 py-0.5 rounded-lg w-fit">{acc.industry ?? '—'}</span>

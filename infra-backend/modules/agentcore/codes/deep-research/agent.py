@@ -35,6 +35,7 @@ from .tools import (
     read_session_memory,
     write_to_session_memory,
     write_research_report,
+    persist_research_accounts,
 )
 
 MODEL = os.environ.get("DEEP_RESEARCH_MODEL", "global.amazon.nova-2-lite-v1:0")
@@ -208,7 +209,9 @@ contains any company_name.
 Output a ranked list of 10-15 companies with:
   { rank, company, reasons: list, strategies: list, confidence }
 
-Then call write_research_report to persist the output.
+Then call write_research_report with ranked_companies populated (company or
+company_name, reasons, strategies, confidence). That tool also writes each
+company into the CRM Companies list.
 Never invent companies that were not in session memory.
 """.strip(),
         tools = [read_session_memory, write_research_report],
@@ -225,6 +228,11 @@ Never invent companies that were not in session memory.
 
     synthesis_result = synthesis_agent(synthesis_prompt)
 
+    try:
+        crm = persist_research_accounts(tenant_id, session_id, goal)
+    except Exception as exc:
+        crm = {"savedCount": 0, "accounts": [], "errors": [str(exc)]}
+
     return {
         "status":      "complete",
         "sessionId":   session_id,
@@ -234,4 +242,6 @@ Never invent companies that were not in session memory.
         "completedAt": datetime.datetime.utcnow().isoformat() + "Z",
         "subAgentResults": sub_results,
         "synthesis":   str(synthesis_result),
+        "crmAccounts": crm.get("accounts", []),
+        "crmSaved":    crm.get("savedCount", 0),
     }

@@ -287,9 +287,17 @@ export default function DeepResearchPage() {
           {run?.status === 'completed' && (
             <div className="rounded-xl border border-emerald-200 dark:border-emerald-500/25 bg-emerald-50/70 dark:bg-emerald-500/10 px-4 py-3 text-[0.84rem] text-slate-700 dark:text-slate-300">
               <p className="font-semibold text-emerald-800 dark:text-emerald-200">Research finished.</p>
-              <Link to={inspectHref} className="inline-block mt-2 text-indigo-600 dark:text-indigo-400 font-semibold hover:underline">
-                Read the findings
-              </Link>
+              <p className="mt-1 text-slate-600 dark:text-slate-400">
+                Findings are on this run. Matching companies are saved under Companies.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-3">
+                <Link to={inspectHref} className="text-indigo-600 dark:text-indigo-400 font-semibold hover:underline">
+                  Read the findings
+                </Link>
+                <Link to="/accounts" className="text-indigo-600 dark:text-indigo-400 font-semibold hover:underline">
+                  Open Companies
+                </Link>
+              </div>
             </div>
           )}
 
