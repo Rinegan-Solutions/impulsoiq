@@ -250,22 +250,55 @@ resource "aws_api_gateway_gateway_response" "cors_5xx" {
 # API Gateway deployments are immutable snapshots. Without a trigger that
 # changes when the routes change, Terraform reuses the existing deployment and
 # route edits never reach the stage -- a silent, confusing failure.
+#
+# WHY THE TRIGGER HASHES CONFIGURATION, NOT THE RESOURCES
+# It used to hash the resource objects themselves (aws_api_gateway_resource.route,
+# ...method, ...integration, the gateway responses). Those objects carry
+# attributes the provider only settles while applying, so the hash computed
+# during plan could differ from the one computed during apply, and the apply died
+# with:
+#
+#   Provider produced inconsistent final plan ... .triggers["redeploy"]:
+#   was cty.StringVal("f5f8...") but now cty.StringVal("7580...")
+#
+# That aborts the run AFTER earlier resources have already been modified, which
+# is the worst kind of failure: a half-applied environment.
+#
+# Everything below is known from the configuration at plan time, so plan and
+# apply cannot disagree. It still covers every change that needs republishing:
+#   rest_routes  -- a route added, removed, re-pathed, re-methoded, or its
+#                   authorization flipped
+#   lambda arns  -- an integration retargeted at a different function
+#   cors headers -- the gateway-response and preflight header values
+#
+# A new function's ARN is unknown at plan; that makes the whole trigger unknown,
+# which Terraform handles correctly (it simply plans a new deployment). Unknown
+# becoming known is allowed -- it is only known-becoming-different that fails.
+#
+# depends_on does the ordering the old trigger was accidentally providing: the
+# deployment is still created after every method and integration exists, so a
+# snapshot is never taken of a half-built API.
 resource "aws_api_gateway_deployment" "main" {
   rest_api_id = aws_api_gateway_rest_api.main.id
 
   triggers = {
-    redeploy = sha1(jsonencode([
-      local.rest_routes,
-      aws_api_gateway_resource.route,
-      aws_api_gateway_method.route,
-      aws_api_gateway_integration.route,
-      aws_api_gateway_method.options,
-      aws_api_gateway_integration.options,
-      aws_api_gateway_integration_response.options,
-      aws_api_gateway_gateway_response.cors_4xx,
-      aws_api_gateway_gateway_response.cors_5xx,
-    ]))
+    redeploy = sha1(jsonencode({
+      routes  = local.rest_routes
+      lambdas = var.lambda_function_arns
+      cors    = local.cors_gateway_headers
+    }))
   }
+
+  depends_on = [
+    aws_api_gateway_method.route,
+    aws_api_gateway_integration.route,
+    aws_api_gateway_method.options,
+    aws_api_gateway_integration.options,
+    aws_api_gateway_method_response.options,
+    aws_api_gateway_integration_response.options,
+    aws_api_gateway_gateway_response.cors_4xx,
+    aws_api_gateway_gateway_response.cors_5xx,
+  ]
 
   lifecycle {
     create_before_destroy = true
