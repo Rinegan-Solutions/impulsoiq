@@ -221,6 +221,31 @@ resource "aws_api_gateway_integration_response" "options" {
   depends_on = [aws_api_gateway_integration.options]
 }
 
+# API Gateway 4xx/5xx (including 504 integration timeouts) never reach a Lambda,
+# so they would otherwise have no CORS headers. The browser then reports CORS
+# instead of the real timeout.
+locals {
+  cors_gateway_headers = {
+    "gatewayresponse.header.Access-Control-Allow-Origin"  = "'*'"
+    "gatewayresponse.header.Access-Control-Allow-Headers" = "'Content-Type,Authorization,x-impulsoiq-tenant'"
+    "gatewayresponse.header.Access-Control-Allow-Methods" = "'GET,POST,OPTIONS'"
+  }
+}
+
+resource "aws_api_gateway_gateway_response" "cors_4xx" {
+  rest_api_id   = aws_api_gateway_rest_api.main.id
+  response_type = "DEFAULT_4XX"
+
+  response_parameters = local.cors_gateway_headers
+}
+
+resource "aws_api_gateway_gateway_response" "cors_5xx" {
+  rest_api_id   = aws_api_gateway_rest_api.main.id
+  response_type = "DEFAULT_5XX"
+
+  response_parameters = local.cors_gateway_headers
+}
+
 # ── Deployment + stage ────────────────────────────────────────────────────────
 # API Gateway deployments are immutable snapshots. Without a trigger that
 # changes when the routes change, Terraform reuses the existing deployment and
@@ -237,6 +262,8 @@ resource "aws_api_gateway_deployment" "main" {
       aws_api_gateway_method.options,
       aws_api_gateway_integration.options,
       aws_api_gateway_integration_response.options,
+      aws_api_gateway_gateway_response.cors_4xx,
+      aws_api_gateway_gateway_response.cors_5xx,
     ]))
   }
 

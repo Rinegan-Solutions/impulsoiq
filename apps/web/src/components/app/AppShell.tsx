@@ -9,6 +9,11 @@
  *
  * The microphone deliberately does NOT live here: the ambient assistant is
  * offered next to the greeting on Home, where the conversation actually starts.
+ *
+ * LAYOUT
+ * Wordmark left, modes centred, notifications and account right. The centre
+ * column is a real grid track, so the nav stays on the bar's axis however wide
+ * the workspace name or the right-hand cluster becomes.
  */
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Link, useNavigate, useLocation } from 'react-router-dom';
@@ -20,6 +25,7 @@ import type { SessionUser } from '@/lib/auth/cognito';
 import { useTenant } from '@/lib/useTenant';
 import { workspaceHost } from '@/lib/tenant';
 import { CommandPalette } from '@/components/app/CommandPalette';
+import { NotificationsBell } from '@/components/app/NotificationsBell';
 import { childActive, modeForPath, modesFor } from '@/lib/nav';
 
 function roleLabel(user: SessionUser): string {
@@ -156,19 +162,24 @@ function ModeBar({ onMenuClick }: { onMenuClick: () => void }) {
   const modes = modesFor(roleOf(user), tenant?.tier);
   const activeMode = modeForPath(location.pathname, modes);
 
+  // Three columns rather than flex-with-spacer: the nav is centred against the
+  // BAR, not against whatever is left over after the wordmark. The side columns
+  // are equal 1fr tracks and `min-w-0` lets them shrink instead of shoving the
+  // centre off-axis when a long workspace name sits under the wordmark.
   return (
-    <header className="h-[64px] flex items-center gap-3 sm:gap-5 px-4 sm:px-6 border-b border-slate-200 dark:border-white/[0.06] bg-white dark:bg-[#020617] flex-shrink-0 z-20">
-      <button
-        onClick={onMenuClick}
-        className="lg:hidden text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-white transition-colors"
-        aria-label="Open menu"
-      >
-        <Menu size={20} />
-      </button>
+    <header className="h-[64px] grid grid-cols-[1fr_auto_1fr] items-center gap-3 sm:gap-5 px-4 sm:px-6 border-b border-slate-200 dark:border-white/[0.06] bg-white dark:bg-[#020617] flex-shrink-0 z-20">
+      <div className="flex items-center gap-3 min-w-0">
+        <button
+          onClick={onMenuClick}
+          className="lg:hidden text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-white transition-colors"
+          aria-label="Open menu"
+        >
+          <Menu size={20} />
+        </button>
+        <Wordmark />
+      </div>
 
-      <Wordmark />
-
-      <nav className="hidden lg:flex items-center gap-1 ml-2" aria-label="Main">
+      <nav className="hidden lg:flex items-center gap-1 justify-self-center" aria-label="Main">
         {modes.map((mode) => {
           const Icon = mode.icon;
           const isActive = activeMode?.id === mode.id;
@@ -191,10 +202,11 @@ function ModeBar({ onMenuClick }: { onMenuClick: () => void }) {
         })}
       </nav>
 
-      <div className="flex-1" />
-
-      <div className="flex items-center gap-2">
-        <CommandPalette />
+      <div className="flex items-center gap-1 justify-self-end">
+        {/* No trigger: the search bar is gone from the chrome, but Cmd/Ctrl-K
+            still opens the palette. */}
+        <CommandPalette showTrigger={false} />
+        <NotificationsBell />
         <AvatarDropdown />
       </div>
     </header>

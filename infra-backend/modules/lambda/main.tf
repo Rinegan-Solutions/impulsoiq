@@ -6,6 +6,12 @@ locals {
   crm_write_service_arn = "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${var.project}-crm-write-service-${var.env}"
   crm_read_service_arn  = "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${var.project}-crm-read-${var.env}"
 
+  # Must match aws_ses_configuration_set.main in modules/api/ses.tf. The IAM
+  # grant below and the handler's SES_CONFIGURATION_SET both read this, so a
+  # rename cannot leave one of them pointing at a set that does not exist --
+  # which is exactly how invitation mail came to be denied.
+  ses_configuration_set = "impulsoiq-${var.env}"
+
   functions = {
     crm-write-service    = { handler = "handler.handler", timeout = 30, memory = 256 }
     crm-read             = { handler = "handler.handler", timeout = 15, memory = 256 }
@@ -44,7 +50,7 @@ locals {
     # EventBridge Scheduler or invoked with lambda:InvokeFunction. Anything that
     # needs to run an agent calls this and passes the agent ARN in the payload.
     # Timeout matches the longest scheduled agent run (deep research).
-    agent-invoker = { handler = "handler.handler", timeout = 300, memory = 256 }
+    agent-invoker = { handler = "handler.handler", timeout = 900, memory = 256 }
     # tenant-provisioner is created in modules/auth (needs cognito pool ARN); listed here
     # only so its dist.zip is built by the same buildspec loop.
   }
@@ -216,14 +222,33 @@ resource "aws_iam_role_policy" "lambda" {
       },
       {
         # @aws-sdk/client-sesv2 — SendEmailCommand from invitation-service.
-        # Scoped to the verified parent identity that every ImpulsoIQ address
-        # sends under (see modules/api/ses.tf for why the subdomain is not a
-        # separate identity), and further narrowed to the From address this
-        # environment actually uses.
-        Sid      = "SesSendInvitations"
-        Effect   = "Allow"
-        Action   = ["ses:SendEmail", "ses:SendRawEmail"]
-        Resource = "arn:aws:ses:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:identity/rinegansolutions.com"
+        #
+        # TWO resources, not one. A SendEmail call that names a configuration
+        # set is authorised against the configuration set AS WELL AS the
+        # sending identity. With only the identity listed here, every invitation
+        # failed with:
+        #
+        #   is not authorized to perform 'ses:SendEmail' on resource
+        #   'arn:aws:ses:eu-west-2:...:configuration-set/impulsoiq-prod'
+        #
+        # The service authorization reference does not spell this out, but the
+        # runtime denial names the exact ARN, so both belong here. Dropping the
+        # configuration set from the send instead is not an option: it is what
+        # feeds the bounce and complaint alarms in modules/api/ses.tf that pause
+        # outbound sending.
+        #
+        # The identity is the verified parent every ImpulsoIQ address sends
+        # under (see modules/api/ses.tf for why the subdomain is not a separate
+        # identity), and the condition narrows this to the one From address this
+        # environment uses — so the role cannot send as anybody else at the
+        # domain.
+        Sid    = "SesSendInvitations"
+        Effect = "Allow"
+        Action = ["ses:SendEmail", "ses:SendRawEmail"]
+        Resource = [
+          "arn:aws:ses:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:identity/rinegansolutions.com",
+          "arn:aws:ses:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:configuration-set/${local.ses_configuration_set}",
+        ]
         Condition = {
           StringEquals = { "ses:FromAddress" = var.ses_from_address }
         }
@@ -321,7 +346,7 @@ resource "aws_lambda_function" "fn" {
         # per-environment tenant wildcard certificate.
         WEB_HOST              = var.web_host
         SES_FROM_ADDRESS      = var.ses_from_address
-        SES_CONFIGURATION_SET = "impulsoiq-${var.env}"
+        SES_CONFIGURATION_SET = local.ses_configuration_set
       } : {},
       each.key == "csat-capture" ? {
         CONNECT_INTAKE_ARN = "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${var.project}-connect-intake-${var.env}"

@@ -588,37 +588,43 @@ export const handler: APIGatewayProxyHandler = async (event) => {
         status: 'running',
         input: { goal: researchGoal, icp: body.icp ?? '', approved: true },
       }, actor);
-      const invoked = await invokeJson(INVOKER_ARN, {
-        agentRuntimeArn: arn,
-        payload: {
-          tenantId,
-          goal: researchGoal,
-          icp: body.icp ?? '',
-          approved: true,
-          agentRunId: run.id,
-        },
-      });
-      if (invoked.ok === false) {
+      // Fire-and-forget: the Swarm outlives API Gateway's 29s integration
+      // timeout. Waiting here produced a 504 with no CORS headers, which the
+      // browser reported as a CORS failure. agent-invoker marks the run done.
+      const started = await lambda.send(new InvokeCommand({
+        FunctionName: INVOKER_ARN,
+        InvocationType: 'Event',
+        Payload: Buffer.from(JSON.stringify({
+          agentRuntimeArn: arn,
+          completeRun: {
+            tenantId,
+            agentRunId: run.id,
+            agentType: 'deep_research',
+          },
+          payload: {
+            tenantId,
+            goal: researchGoal,
+            icp: body.icp ?? '',
+            approved: true,
+            agentRunId: run.id,
+          },
+        })),
+      }));
+      if (started.StatusCode && started.StatusCode >= 400) {
         await crmWrite(tenantId, 'upsert_agent_run', {
           id: run.id,
           agentType: 'deep_research',
           status: 'failed',
-          error: String(invoked.error ?? 'invoke failed'),
+          error: 'Could not start Deep Research (async invoke rejected)',
         }, actor);
-        return json(502, { error: invoked.error ?? 'Deep Research invoke failed', id: run.id });
+        return json(502, { error: 'Could not start Deep Research', id: run.id });
       }
-      await crmWrite(tenantId, 'upsert_agent_run', {
-        id: run.id,
-        agentType: 'deep_research',
-        status: 'completed',
-        output: (invoked.response as Record<string, unknown>) ?? {},
-      }, actor);
       await recordActivation(tenantId, 'run_started', { kind: 'deep_research', id: run.id });
-      return json(200, {
+      return json(202, {
         ok: true,
+        status: 'started',
         id: run.id,
         inspectHref: `/control-panel?run=${run.id}`,
-        response: invoked.response,
       });
     }
 

@@ -82,8 +82,8 @@ resource "aws_sfn_state_machine" "campaign" {
         Parameters = {
           FunctionName = var.agent_invoker_lambda_arn
           Payload = {
-            throwOnError     = true
-            agentRuntimeArn  = var.research_enrichment_agent_arn
+            throwOnError    = true
+            agentRuntimeArn = var.research_enrichment_agent_arn
             payload = {
               "tenantId.$"   = "$.tenantId"
               "contactId.$"  = "$.contactId"
@@ -654,12 +654,12 @@ resource "aws_sfn_state_machine" "campaign" {
             throwOnError    = true
             agentRuntimeArn = var.voice_agent_arn
             payload = {
-              "tenantId.$"      = "$.tenantId"
-              "contactId.$"     = "$.contactId"
-              "campaignId.$"    = "$.campaignId"
-              "agentRunId.$"    = "$.agentRunId"
-              callGoal          = "qualification"
-              "taskToken.$"     = "$$.Task.Token"
+              "tenantId.$"       = "$.tenantId"
+              "contactId.$"      = "$.contactId"
+              "campaignId.$"     = "$.campaignId"
+              "agentRunId.$"     = "$.agentRunId"
+              callGoal           = "qualification"
+              "taskToken.$"      = "$$.Task.Token"
               "idempotencyKey.$" = "$$.Execution.Name"
             }
           }

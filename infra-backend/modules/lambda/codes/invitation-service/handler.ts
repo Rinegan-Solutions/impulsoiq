@@ -257,7 +257,23 @@ async function createInvitation(event: APIGatewayProxyEvent, tenantId: string, b
   } catch (err) {
     // The invitation exists; only delivery failed. Say so plainly so an admin
     // can resend rather than assuming the person was emailed.
-    console.error('invitation email failed', { tenantId, error: (err as Error).message });
+    //
+    // The first release of this said only "the email could not be sent", which
+    // took a CloudWatch dig to explain: SES was refusing the send because the
+    // Lambda role lacked permission on the CONFIGURATION SET (SendEmail is
+    // authorised against the configuration set as well as the identity). A
+    // misconfiguration and a transient bounce need different responses from the
+    // admin reading this, so they are told apart here. The SES message itself
+    // stays in the log -- it names role ARNs, which do not belong in the UI.
+    const name = (err as { name?: string }).name ?? '';
+    const detail = (err as Error).message ?? '';
+    const misconfigured =
+      name === 'AccessDeniedException' ||
+      name === 'NotFoundException' ||
+      /not authorized|AccessDenied|ConfigurationSetDoesNotExist|MessageRejected/i.test(detail);
+
+    console.error('invitation email failed', { tenantId, name, error: detail });
+
     return json(202, {
       ok: true,
       id: written.id,
@@ -265,7 +281,9 @@ async function createInvitation(event: APIGatewayProxyEvent, tenantId: string, b
       role,
       expiresAt,
       emailed: false,
-      error: 'Invitation created, but the email could not be sent. Use Resend.',
+      error: misconfigured
+        ? 'Invitation created, but email delivery is not configured correctly for this workspace. Resending will not help until an administrator fixes it.'
+        : 'Invitation created, but the email could not be sent. Use Resend.',
     });
   }
 

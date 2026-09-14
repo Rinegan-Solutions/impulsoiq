@@ -9,7 +9,13 @@ import { cn } from '@/lib/utils';
 
 type Hit = { href: string; title: string; subtitle?: string };
 
-export function CommandPalette() {
+/**
+ * `showTrigger` false mounts the palette WITHOUT its search bar: the top bar no
+ * longer carries one, but the component still owns the global Cmd/Ctrl-K
+ * handler, so unmounting it would have quietly removed search from the product
+ * rather than just from the chrome.
+ */
+export function CommandPalette({ showTrigger = true }: { showTrigger?: boolean } = {}) {
   const { user } = useAuth();
   const tenant = useTenant(user?.tenantId);
   const navigate = useNavigate();
@@ -90,6 +96,7 @@ export function CommandPalette() {
   }, [open, q, routes]);
 
   if (!open) {
+    if (!showTrigger) return null;
     return (
       <button
         type="button"

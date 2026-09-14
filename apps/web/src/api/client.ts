@@ -121,6 +121,9 @@ export const agentRunsApi = {
     operation('/crm-read', 'list_agent_runs', { page, pageSize },
       PaginatedSchema(AgentRunSchema)),
 
+  get: (id: string) =>
+    operation('/crm-read', 'get_agent_run', { id }, AgentRunSchema.nullable()),
+
   usage: () =>
     operation('/crm-read', 'get_metering_usage', {},
       z.object({
