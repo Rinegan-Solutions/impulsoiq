@@ -27,6 +27,8 @@ export interface AuditEvent {
   actorType:  'human' | 'agent';
   actorId:    string;
   data:       Record<string, unknown>;
+  agentType?: string;
+  status?:    string;
 }
 
 export async function publishEvent(ev: AuditEvent): Promise<void> {
@@ -45,8 +47,56 @@ export async function publishEvent(ev: AuditEvent): Promise<void> {
       actorType:  ev.actorType,
       actorId:    ev.actorId,
       data:       ev.data,
+      agentType:  ev.agentType ?? (typeof ev.data.agentType === 'string' ? ev.data.agentType : undefined),
+      status:     ev.status ?? (typeof ev.data.status === 'string' ? ev.data.status : undefined),
+      contact_id: typeof ev.data.contactId === 'string' ? ev.data.contactId : undefined,
+      campaign_id: typeof ev.data.campaignId === 'string' ? ev.data.campaignId : undefined,
+      agent_run_id: typeof ev.data.agentRunId === 'string' ? ev.data.agentRunId : undefined,
       occurredAt: now,
       ttl,
     },
   }));
+}
+
+/** First-occurrence activation markers. Conditioned so they fire once per tenant. */
+export async function recordFirstActivation(
+  tenantId: string,
+  eventType: 'first_outbound_sent' | 'first_call_placed',
+  data: Record<string, unknown>,
+): Promise<void> {
+  const now = new Date().toISOString();
+  try {
+    await dynamo.send(new PutCommand({
+      TableName: TABLE,
+      Item: {
+        pk: `${tenantId}#activation#${eventType}`,
+        sk: 'current',
+        tenantId,
+        entityType: 'activation',
+        entityId: eventType,
+        eventType,
+        occurredAt: now,
+        data,
+        ttl: Math.floor(Date.now() / 1000) + SEVEN_YEARS_S,
+      },
+      ConditionExpression: 'attribute_not_exists(pk)',
+    }));
+    await dynamo.send(new PutCommand({
+      TableName: TABLE,
+      Item: {
+        pk: `${tenantId}#activation#log`,
+        sk: `${now}#${eventType}`,
+        tenantId,
+        entityType: 'activation',
+        entityId: eventType,
+        eventType,
+        occurredAt: now,
+        data,
+        ttl: Math.floor(Date.now() / 1000) + SEVEN_YEARS_S,
+      },
+    }));
+  } catch (err) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return;
+    console.error('recordFirstActivation failed', err);
+  }
 }

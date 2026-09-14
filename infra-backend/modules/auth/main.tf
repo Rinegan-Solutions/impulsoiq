@@ -24,8 +24,31 @@ resource "aws_cognito_user_pool" "main" {
     }
   }
 
-  # Post-confirmation trigger: provisions tenant + assigns admin group
+  # Display name for a workspace created at sign-up. tenant-provisioner copies it
+  # into tenant.name when (and only when) it creates the workspace; before this
+  # attribute existed the name typed at sign-up was discarded and every
+  # workspace was named after its slug.
+  #
+  # ADDITIVE ONLY: Cognito allows custom attributes to be added to an existing
+  # pool but never modified or removed, and the provider applies an added schema
+  # block in place. Check the plan reads "update in-place" for the pool.
+  schema {
+    name                = "workspace_name"
+    attribute_data_type = "String"
+    mutable             = true
+    required            = false
+    string_attribute_constraints {
+      min_length = 1
+      max_length = 80
+    }
+  }
+
+  # One function, two triggers (it switches on triggerSource):
+  #   pre_sign_up       refuses an invalid/reserved workspace address, or an
+  #                     existing workspace the email's domain may not join
+  #   post_confirmation creates the workspace, or adds the verified member
   lambda_config {
+    pre_sign_up       = aws_lambda_function.tenant_provisioner.arn
     post_confirmation = aws_lambda_function.tenant_provisioner.arn
   }
 
@@ -106,9 +129,18 @@ resource "aws_iam_role_policy" "tenant_provisioner" {
         Resource = var.crm_write_service_arn
       },
       {
-        Sid      = "AdminAddUserToGroup"
+        Sid      = "InvokeCrmRead"
         Effect   = "Allow"
-        Action   = "cognito-idp:AdminAddUserToGroup"
+        Action   = "lambda:InvokeFunction"
+        Resource = var.crm_read_service_arn
+      },
+      {
+        # AdminDisableUser: an account that confirmed into a workspace it may not
+        # join (someone else created it after sign-up) is disabled rather than
+        # left holding that workspace's claim.
+        Sid      = "CognitoMembership"
+        Effect   = "Allow"
+        Action   = ["cognito-idp:AdminAddUserToGroup", "cognito-idp:AdminDisableUser"]
         Resource = aws_cognito_user_pool.main.arn
       }
     ]
@@ -130,6 +162,7 @@ resource "aws_lambda_function" "tenant_provisioner" {
   environment {
     variables = {
       CRM_WRITE_SERVICE_ARN = var.crm_write_service_arn
+      CRM_READ_SERVICE_ARN  = var.crm_read_service_arn
       ENV                   = var.env
     }
   }

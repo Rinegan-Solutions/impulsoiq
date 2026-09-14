@@ -34,6 +34,47 @@ variable "reporting_table" {
   default     = ""
   description = "DynamoDB reporting table name for evaluations-runner"
 }
+
 variable "tags" {
   type = map(string)
+}
+
+variable "calle_base_url" {
+  type        = string
+  default     = ""
+  description = "CALL-E API base URL for best-effort in-flight cancel"
+}
+
+variable "app_secret_arn" {
+  type        = string
+  description = "Secrets Manager ARN for the packed JSON app secret"
+}
+
+variable "stripe_price_starter_monthly" {
+  type    = string
+  default = ""
+}
+variable "stripe_price_starter_annual" {
+  type    = string
+  default = ""
+}
+variable "stripe_price_growth_monthly" {
+  type    = string
+  default = ""
+}
+variable "stripe_price_growth_annual" {
+  type    = string
+  default = ""
+}
+variable "stripe_price_pack_call_minutes" {
+  type    = string
+  default = ""
+}
+variable "stripe_price_pack_enrichment" {
+  type    = string
+  default = ""
+}
+variable "stripe_price_pack_concurrent_runs" {
+  type    = string
+  default = ""
 }

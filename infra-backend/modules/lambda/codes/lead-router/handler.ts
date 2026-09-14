@@ -201,6 +201,12 @@ export const handler: Handler<
       | undefined;
     const tenantId = claims?.['custom:tenant_id'] ?? null;
     if (!tenantId) return { statusCode: 401, body: JSON.stringify({ error: 'Missing tenant_id' }) };
+    // The claim is chosen by the browser at sign-up; membership is the Cognito
+    // group tenant-provisioner grants. Same rule as hasWorkspaceRole in crm-read.
+    const groups = String(claims?.['cognito:groups'] ?? '').split(/[\s,[\]"]+/);
+    if (!groups.some((g) => g === 'admin' || g === 'manager' || g === 'member')) {
+      return { statusCode: 403, body: JSON.stringify({ error: 'This account has not been granted access to its workspace' }) };
+    }
     const body = JSON.parse(apigwEvent.body ?? '{}') as Omit<LeadRouterInput, 'tenantId'>;
     input = { ...body, tenantId };
   } else {

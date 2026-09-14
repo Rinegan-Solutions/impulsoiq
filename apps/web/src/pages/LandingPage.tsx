@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
-  motion, useInView, animate, useMotionValue, useTransform, useSpring, AnimatePresence,
+  motion, useMotionValue, useTransform, useSpring, AnimatePresence,
 } from 'framer-motion';
 import {
   ArrowRight, Check, Search, Mail, Phone, Database,
@@ -16,23 +17,20 @@ import { SEO } from '@/components/SEO';
 type FeedType = 'research' | 'coord' | 'outreach' | 'voice' | 'crm';
 interface FeedEntry { type: FeedType; msg: string; time: string }
 
+// An illustration of the workflow, labelled as such in the UI. Steps only —
+// no real or invented people, companies, or usage figures.
 const FEED_DATA: { type: FeedType; msg: string }[] = [
-  { type: 'research', msg: 'Enriched Sarah Chen · Acme Corp · CTO · 3 intent signals' },
-  { type: 'coord',    msg: 'Coordinator: routing Sarah Chen → Outreach agent' },
-  { type: 'outreach', msg: 'Email sent → Marcus Webb · Strata Labs · "Q4 efficiency"' },
-  { type: 'voice',    msg: 'Call initiated: Jordan Lee · NexaCo · qualification' },
-  { type: 'crm',      msg: 'Activity logged: meeting booked · Deal → Qualified stage' },
-  { type: 'research', msg: 'Enriched Priya Nair · Vantage AI · VP Eng · Series B' },
-  { type: 'outreach', msg: 'Follow-up email sent → Tom Walsh · Ember Capital' },
-  { type: 'voice',    msg: 'Call completed: Jennifer Park · demo booked 2026-09-04' },
-  { type: 'crm',      msg: 'CRM: 2 contacts → Qualified · 1 deal created' },
-  { type: 'coord',    msg: 'Coordinator: 8 new leads queued for enrichment' },
-  { type: 'research', msg: 'Found: Daniel Osei · CirclePoint · CRO · raised $45M' },
-  { type: 'outreach', msg: 'SMS consent-checked + sent → Aiko Tanaka' },
-  { type: 'voice',    msg: 'Voicemail left: Carlos Rivera · retry scheduled in 4h' },
-  { type: 'crm',      msg: 'Intent: email opened ×3 · contact score raised to 87' },
-  { type: 'coord',    msg: 'Approval gate: high-value account → awaiting review' },
-  { type: 'outreach', msg: 'Sequence paused: Lisa Chen replied → routing to human' },
+  { type: 'research', msg: 'New lead enriched · role, company and 3 intent signals' },
+  { type: 'coord',    msg: 'Coordinator: lead routed to Outreach agent' },
+  { type: 'outreach', msg: 'Consent verified · personalised email sent' },
+  { type: 'voice',    msg: 'Qualification call started' },
+  { type: 'crm',      msg: 'Meeting booked · deal moved to Qualified' },
+  { type: 'research', msg: 'Company brief built · funding and hiring signals' },
+  { type: 'outreach', msg: 'Follow-up scheduled · day 3 of sequence' },
+  { type: 'voice',    msg: 'No answer · voicemail left · retry scheduled' },
+  { type: 'crm',      msg: 'Call outcome and transcript logged to contact' },
+  { type: 'coord',    msg: 'Approval gate: high-value account awaiting review' },
+  { type: 'outreach', msg: 'Reply received · sequence paused, routed to a rep' },
 ];
 
 const FEED_LABEL: Record<FeedType, string> = {
@@ -59,7 +57,7 @@ const STEPS = [
   {
     n: '01 / 05', icon: <Search size={20} />, color: 'bg-indigo-500/15 text-indigo-400',
     title: 'Research & Enrich',
-    body: 'Agents find ICP-fit leads, verify contact info, and enrich with LinkedIn signals, company news, and intent data — automatically.',
+    body: 'Agents find ICP-fit leads, verify emails through a multi-source waterfall, and enrich from attributed providers — never invented firmographics.',
     image: 'https://images.unsplash.com/photo-1551650975-87deedd944c3?w=900&fit=crop&q=80',
     caption: 'AI surfaces buying signals and builds a rich contact brief before any outreach lands.',
   },
@@ -97,14 +95,14 @@ const FEATURES = [
   {
     span: 'col-span-8', icon: <Search size={20} />, color: 'bg-indigo-500/15 text-indigo-500 dark:text-indigo-400',
     title: 'AI Research & Enrichment',
-    body: 'Before any outreach lands, agents pull company news, hiring signals, LinkedIn activity, and intent data — and synthesize a contact brief that powers every message.',
+    body: 'Before any outreach lands, agents pull attributed firmographics and verified emails, then synthesize a contact brief that powers every message.',
     tag: 'Research Agent · Runs automatically',
   },
   {
     span: 'col-span-4', icon: <ShieldCheck size={20} />, color: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
     title: 'Consent-Gated by Default',
     body: 'Every email, SMS, and call checks a ConsentRecord before firing. Compliance is a hard gate, not a checkbox.',
-    tag: 'GDPR-ready · Audit trail',
+    tag: 'Consent records · Audit trail',
   },
   {
     span: 'col-span-5', icon: <Phone size={20} />, color: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
@@ -129,24 +127,6 @@ const FEATURES = [
     title: 'Multi-workspace Architecture',
     body: "Built for agencies managing multiple client workspaces. Strict tenant isolation — one workspace never touches another's data.",
     tag: 'Multi-tenant · Enterprise-grade',
-  },
-];
-
-const TESTIMONIALS = [
-  {
-    stars: 5, initials: 'RK', color: 'from-indigo-500 to-violet-500',
-    quote: '"We went from 200 personalized touches a week to over 3,000. ImpulsoIQ didn\'t replace our SDRs — it turned each one into a force multiplier."',
-    name: 'Rania Khalid', role: 'VP Sales · Meridian Health',
-  },
-  {
-    stars: 5, initials: 'JP', color: 'from-emerald-500 to-cyan-500',
-    quote: '"The control panel was a game-changer for compliance. We can see every outreach decision before it fires — and the consent gating is exactly what legal needed."',
-    name: 'James Park', role: 'Revenue Operations · Strata Labs',
-  },
-  {
-    stars: 5, initials: 'AM', color: 'from-amber-500 to-rose-500',
-    quote: '"The AI voice calls book meetings we\'d never land manually. The quality surprised our whole team — prospects consistently can\'t tell the difference."',
-    name: 'Amara Mensah', role: 'Founder · Northvault',
   },
 ];
 
@@ -265,27 +245,19 @@ function ActivityTerminal() {
         <span className="w-2.5 h-2.5 rounded-full bg-[#ffbd2e]" aria-hidden="true" />
         <span className="w-2.5 h-2.5 rounded-full bg-[#28c840]" aria-hidden="true" />
         <span className={cn('flex-1 text-center font-mono text-xs', isDark ? 'text-slate-500' : 'text-slate-400')}>
-          ImpulsoIQ · Agent Live Feed
+          ImpulsoIQ · Agent Activity
         </span>
-        <span className="flex items-center gap-1.5 text-[0.65rem] font-bold text-emerald-400 bg-emerald-500/12 border border-emerald-500/25 px-2.5 py-0.5 rounded-full">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse-dot" aria-hidden="true" />
-          Live
+        <span className="text-[0.65rem] font-bold text-indigo-400 bg-indigo-500/12 border border-indigo-500/25 px-2.5 py-0.5 rounded-full">
+          Example
         </span>
       </div>
-      {/* Campaign bar */}
+      {/* Context bar */}
       <div className={cn(
         'flex items-center justify-between px-4 py-2.5 border-b text-[0.72rem]',
         isDark ? 'border-white/[0.05]' : 'border-slate-100',
       )}>
-        <span className={cn('font-medium', isDark ? 'text-slate-400' : 'text-slate-600')}>Campaign: Q4 SaaS Outreach</span>
-        <div className={cn('flex gap-4', isDark ? 'text-slate-500' : 'text-slate-400')}>
-          <span className="flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" aria-hidden="true" />24 running
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" aria-hidden="true" />1,247 touched
-          </span>
-        </div>
+        <span className={cn('font-medium', isDark ? 'text-slate-400' : 'text-slate-600')}>One lead, from first signal to CRM</span>
+        <span className={isDark ? 'text-slate-500' : 'text-slate-400'}>Illustrative</span>
       </div>
       {/* Feed */}
       <div
@@ -295,7 +267,7 @@ function ActivityTerminal() {
         )}
         role="log"
         aria-live="polite"
-        aria-label="Agent activity feed"
+        aria-label="Example agent activity"
       >
         {entries.map((e, i) => (
           <motion.div
@@ -357,9 +329,9 @@ function Hero() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.65, delay: 0.14, ease }}
           >
-            Autonomous AI agents that research leads, write personalized outreach,
-            make qualification calls, and keep your CRM flawless — running 24/7
-            while your team focuses on closing.
+            Autonomous agents that research leads, draft outreach, and — on paid plans —
+            place qualification calls, with a Control Panel, consent gates, and an audit trail.
+            This is a workspace, not a promise to replace your SDR.
           </motion.p>
 
           <motion.div
@@ -368,16 +340,16 @@ function Hero() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.26, ease }}
           >
-            <a
-              href="#cta"
+            <Link
+              to="/sign-up"
               className="relative inline-flex items-center gap-2 px-6 py-3.5 font-semibold text-white rounded-xl overflow-hidden bg-gradient-to-r from-indigo-600 to-violet-600 shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:shadow-indigo-500/35 hover:-translate-y-0.5 transition-all duration-200"
             >
               <span className="absolute inset-0 bg-gradient-to-r from-transparent via-white/12 to-transparent -translate-x-full animate-shimmer" aria-hidden="true" />
-              Deploy your first agent
+          Open your workspace
               <ArrowRight size={16} />
-            </a>
+            </Link>
             <a
-              href="/#how"
+              href="#how"
               className="inline-flex items-center gap-2 px-5 py-3.5 font-semibold rounded-xl border border-slate-300 dark:border-white/[0.15] text-slate-700 dark:text-slate-300 hover:border-slate-400 dark:hover:border-white/30 hover:bg-slate-100/60 dark:hover:bg-white/[0.04] transition-all duration-200"
             >
               See how it works
@@ -385,27 +357,13 @@ function Hero() {
           </motion.div>
 
           <motion.div
-            className="flex items-center gap-3 text-sm text-slate-500 dark:text-slate-500"
+            className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-500"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ duration: 0.5, delay: 0.44 }}
           >
-            <div className="flex" aria-hidden="true">
-              {[
-                'https://randomuser.me/api/portraits/women/44.jpg',
-                'https://randomuser.me/api/portraits/men/32.jpg',
-                'https://randomuser.me/api/portraits/women/68.jpg',
-                'https://randomuser.me/api/portraits/men/76.jpg',
-              ].map((src, i) => (
-                <img
-                  key={i}
-                  src={src}
-                  className={cn('w-7 h-7 rounded-full object-cover border-2 border-white dark:border-[#020617]', i > 0 && '-ml-2')}
-                  alt=""
-                />
-              ))}
-            </div>
-            <span>200+ revenue teams in early access · No credit card required</span>
+            <ShieldCheck size={16} className="text-emerald-500 flex-shrink-0" aria-hidden="true" />
+            <span>Consent checked before every email, SMS and call · Every agent action audited</span>
           </motion.div>
         </div>
 
@@ -433,9 +391,9 @@ function LogoStrip() {
     'GTM Leaders', 'Account Executives',
   ];
   return (
-    <div className="border-y border-slate-200 dark:border-white/[0.065] bg-slate-50/60 dark:bg-white/[0.012] py-6 overflow-hidden" aria-label="Trusted by teams at">
+    <div className="border-y border-slate-200 dark:border-white/[0.065] bg-slate-50/60 dark:bg-white/[0.012] py-6 overflow-hidden" aria-label="Who ImpulsoIQ is built for">
       <p className="text-center text-[1.22rem] font-bold uppercase tracking-[0.14em] text-slate-400 dark:text-slate-600 mb-4">
-        Trusted by teams across
+        Built for
       </p>
       <div className="overflow-hidden">
         <motion.div
@@ -454,53 +412,6 @@ function LogoStrip() {
         </motion.div>
       </div>
     </div>
-  );
-}
-
-// ─── Impact Stats ────────────────────────────────────────────────────────────
-
-function StatCard({ value, suffix, label, dec = 0 }: { value: number; suffix: string; label: string; dec?: number }) {
-  const numRef = useRef<HTMLDivElement>(null);
-  const inView = useInView(numRef, { once: true, amount: 0.5 });
-
-  useEffect(() => {
-    if (!inView || !numRef.current) return;
-    const controls = animate(0, value, {
-      duration: 2,
-      ease: [0.22, 1, 0.36, 1],
-      onUpdate(v) {
-        if (numRef.current) {
-          numRef.current.textContent = (dec ? v.toFixed(dec) : Math.round(v).toLocaleString()) + suffix;
-        }
-      },
-    });
-    return controls.stop;
-  }, [inView, value, suffix, dec]);
-
-  return (
-    <FadeUp className="bg-white dark:bg-white/[0.028] border border-slate-200 dark:border-white/[0.065] rounded-2xl p-8 text-center hover:shadow-md dark:hover:bg-white/[0.05] hover:-translate-y-1 transition-all duration-300">
-      <div ref={numRef} className="text-[3.25rem] font-extrabold tracking-[-0.05em] text-slate-900 dark:text-white mb-1.5 tabular-nums">
-        0{suffix}
-      </div>
-      <div className="text-[0.9rem] text-slate-500 dark:text-slate-400 leading-snug">{label}</div>
-    </FadeUp>
-  );
-}
-
-function ImpactStats() {
-  return (
-    <section id="impact" className="py-20 px-4 sm:px-6 bg-white dark:bg-[#020617]">
-      {/* Header uses same max-width as HowItWorks so left edges align */}
-      <FadeUp className="max-w-[1380px] mx-auto mb-10">
-        <div className="text-[0.72rem] font-bold uppercase tracking-[0.12em] text-indigo-600 dark:text-indigo-400 mb-3">By the numbers</div>
-        <h2 className="text-[2rem] sm:text-[2.5rem] font-extrabold tracking-[-0.035em] text-slate-900 dark:text-white">The ImpulsoIQ difference</h2>
-      </FadeUp>
-      <div className="max-w-4xl mx-auto grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <StatCard value={5000} suffix="+" label="Personalized touches per day, per active campaign" />
-        <StatCard value={94} suffix="%" label="CRM data accuracy — auto-logged after every interaction" />
-        <StatCard value={3.2} suffix="×" label="Pipeline velocity vs. manual SDR workflows" dec={1} />
-      </div>
-    </section>
   );
 }
 
@@ -532,7 +443,7 @@ function HowItWorks() {
                 Five autonomous steps.<br />One filled pipeline.
               </h2>
               <p className="text-[1rem] text-slate-500 dark:text-slate-400 leading-relaxed">
-                Your AI agents run the entire SDR workflow — from first signal to CRM update — without a human in the loop, unless you want one.
+                Agents research, draft, and wait for your approval. Voice is metered on paid plans. You stay in the Control Panel.
               </p>
             </FadeUp>
             <div className="flex flex-col gap-2">
@@ -681,12 +592,14 @@ function Features() {
 
 // ─── Control Panel Preview ───────────────────────────────────────────────────
 
+// Illustrative rows for the marketing preview: roles and industries only, no
+// real or invented people or companies.
 const PW_ROWS = [
-  { contact: 'Sarah Chen · Acme Corp', status: 'Running', statusCls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300', agent: 'Voice',    btn: 'Pause' },
-  { contact: 'Marcus Webb · Strata',   status: 'Running', statusCls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300', agent: 'Outreach', btn: 'Kill' },
-  { contact: 'Jordan Lee · NexaCo',    status: 'Paused',  statusCls: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',         agent: 'Research', btn: 'Resume' },
-  { contact: 'Priya Nair · Vantage AI',status: 'Done',    statusCls: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300',      agent: 'CRM',      btn: 'View' },
-  { contact: 'Tom Walsh · Ember Cap.', status: 'Running', statusCls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300', agent: 'Voice',    btn: 'Pause' },
+  { contact: 'VP Sales · FinTech',         status: 'Running', statusCls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300', agent: 'Voice',    btn: 'Pause' },
+  { contact: 'Head of RevOps · SaaS',      status: 'Running', statusCls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300', agent: 'Outreach', btn: 'Kill' },
+  { contact: 'CTO · HealthTech',           status: 'Paused',  statusCls: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',         agent: 'Research', btn: 'Resume' },
+  { contact: 'CRO · Logistics',            status: 'Done',    statusCls: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300',      agent: 'CRM',      btn: 'View' },
+  { contact: 'Founder · B2B Marketplace',  status: 'Running', statusCls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300', agent: 'Voice',    btn: 'Pause' },
 ];
 
 function ControlPanelPreview() {
@@ -700,9 +613,8 @@ function ControlPanelPreview() {
             {/* Header */}
             <div className="flex items-center justify-between px-5 py-3.5 border-b bg-slate-50 border-slate-200 dark:bg-white/[0.02] dark:border-white/[0.06]">
               <span className="text-[0.82rem] font-semibold text-slate-900 dark:text-white">Agent Control Panel</span>
-              <span className="flex items-center gap-1.5 text-[0.68rem] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-100 dark:bg-emerald-500/12 border border-emerald-200 dark:border-emerald-500/25 px-2.5 py-0.5 rounded-full">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-pulse-dot" aria-hidden="true" />
-                12 running
+              <span className="text-[0.68rem] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-100 dark:bg-indigo-500/12 border border-indigo-200 dark:border-indigo-500/25 px-2.5 py-0.5 rounded-full">
+                Example
               </span>
             </div>
             {/* Table head */}
@@ -722,12 +634,12 @@ function ControlPanelPreview() {
                 <span className="text-slate-700 dark:text-slate-400 truncate min-w-0">{r.contact}</span>
                 <span className={cn('text-[0.63rem] font-bold px-1.5 py-0.5 rounded self-center text-center', r.statusCls)}>{r.status}</span>
                 <span className="text-slate-500 dark:text-slate-600 text-[0.7rem]">{r.agent}</span>
-                <button className="text-[0.67rem] font-semibold px-2 py-1 rounded bg-slate-100 dark:bg-white/[0.055] text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-white/[0.12] hover:text-slate-900 dark:hover:text-white transition-all">{r.btn}</button>
+                <span aria-hidden="true" className="text-[0.67rem] font-semibold px-2 py-1 rounded bg-slate-100 dark:bg-white/[0.055] text-slate-600 dark:text-slate-400 text-center">{r.btn}</span>
               </div>
             ))}
             <div className="flex items-center justify-between px-5 py-3 bg-slate-50 dark:bg-white/[0.015] border-t border-slate-200 dark:border-white/[0.04] text-[0.72rem] text-slate-500">
-              <span>Campaign: Q4 SaaS Outreach</span>
-              <a href="#" className="text-indigo-600 dark:text-indigo-400 font-semibold hover:opacity-75 transition-opacity">View all 12 →</a>
+              <span>Illustrative preview</span>
+              <Link to="/sign-up" className="text-indigo-600 dark:text-indigo-400 font-semibold hover:opacity-75 transition-opacity">Try it on your pipeline →</Link>
             </div>
           </div>
         </FadeUp>
@@ -765,48 +677,6 @@ function ControlPanelPreview() {
   );
 }
 
-// ─── Testimonials ────────────────────────────────────────────────────────────
-
-function Testimonials() {
-  return (
-    <section id="testimonials" className="py-20 px-4 sm:px-6 bg-white dark:bg-[#020617]">
-      <FadeUp className="max-w-[1280px] mx-auto mb-10">
-        <div className="text-[0.72rem] font-bold uppercase tracking-[0.12em] text-indigo-600 dark:text-indigo-400 mb-3">What teams say</div>
-        <h2 className="text-[2rem] sm:text-[2.5rem] font-extrabold tracking-[-0.035em] text-slate-900 dark:text-white">
-          Trusted by sales leaders<br />who demand results.
-        </h2>
-      </FadeUp>
-      <div className="max-w-[1280px] mx-auto grid grid-cols-1 md:grid-cols-3 gap-4">
-        {TESTIMONIALS.map((t, i) => (
-          <motion.article
-            key={i}
-            className="bg-slate-50 dark:bg-white/[0.028] border border-slate-200/80 dark:border-white/[0.065] rounded-2xl p-6 relative overflow-hidden hover:shadow-md dark:hover:bg-white/[0.05] hover:-translate-y-1 transition-all duration-300"
-            initial={{ opacity: 0, y: 24 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true, amount: 0.2 }}
-            transition={{ duration: 0.55, delay: i * 0.09, ease }}
-          >
-            <div className="absolute top-0 inset-x-0 h-px bg-gradient-to-r from-transparent via-slate-300/50 dark:via-white/[0.07] to-transparent" aria-hidden="true" />
-            <div className="text-amber-400 tracking-widest text-sm mb-4" aria-label={`${t.stars} out of 5 stars`}>
-              {'★'.repeat(t.stars)}
-            </div>
-            <blockquote className="text-[0.9rem] text-slate-600 dark:text-slate-400 leading-relaxed italic mb-5">{t.quote}</blockquote>
-            <div className="flex items-center gap-3">
-              <div className={cn('w-9 h-9 rounded-full flex-shrink-0 bg-gradient-to-br text-[0.68rem] font-bold text-white flex items-center justify-center', t.color)} aria-hidden="true">
-                {t.initials}
-              </div>
-              <div>
-                <div className="text-[0.855rem] font-bold text-slate-900 dark:text-white">{t.name}</div>
-                <div className="text-[0.76rem] text-slate-500 dark:text-slate-500 mt-px">{t.role}</div>
-              </div>
-            </div>
-          </motion.article>
-        ))}
-      </div>
-    </section>
-  );
-}
-
 // ─── CTA Section ─────────────────────────────────────────────────────────────
 
 function CTASection() {
@@ -818,28 +688,29 @@ function CTASection() {
       <FadeUp className="relative z-10 max-w-[680px] mx-auto text-center">
         <div className="text-[0.72rem] font-bold uppercase tracking-[0.12em] text-indigo-200 mb-4">Get started</div>
         <h2 className="text-[2rem] sm:text-[3rem] font-extrabold tracking-[-0.045em] text-white leading-[1.08] mb-4">
-          Deploy your first AI SDR<br />in under 10 minutes.
+          Run your first sequence
+<br />under a Control Panel.
         </h2>
         <p className="text-[1.05rem] text-indigo-200 leading-relaxed mb-8 max-w-[500px] mx-auto">
-          Connect your ICP, set your sequences, and let ImpulsoIQ agents fill your pipeline — while you focus on the calls that close.
+          Set consent, inspect the graph, approve the send. Voice is on Starter and above.
         </p>
         <div className="flex justify-center flex-wrap gap-3">
-          <a
-            href="/sign-up"
+          <Link
+            to="/sign-up"
             className="inline-flex items-center gap-2 px-6 py-3.5 font-semibold text-indigo-700 bg-white rounded-xl shadow-lg hover:shadow-xl hover:-translate-y-0.5 transition-all"
           >
             Start free — no credit card
             <ArrowRight size={16} />
-          </a>
+          </Link>
           <a
-            href="/#how"
+            href="#how"
             className="inline-flex items-center gap-2 px-5 py-3.5 font-semibold text-white rounded-xl border border-white/30 hover:border-white/60 hover:bg-white/10 transition-all"
           >
-            Watch the walkthrough
+            See how it works
           </a>
         </div>
         <p className="mt-5 text-[0.78rem] text-indigo-300">
-          GDPR-ready · 99.9% uptime SLA
+          Consent-gated by default · Full audit trail
         </p>
       </FadeUp>
     </section>
@@ -877,19 +748,17 @@ export default function LandingPage() {
   return (
     <div className="min-h-screen font-sans antialiased bg-white dark:bg-[#020617] text-slate-900 dark:text-white overflow-x-hidden">
       <SEO
-        title="ImpulsoIQ — AI Sales Agents That Never Sleep"
-        description="Autonomous AI agents that research leads, write personalized outreach, make qualification calls, and keep your CRM flawless — 24/7."
+        title="ImpulsoIQ — Agentic workspace for revenue teams"
+        description="CRM, sequences, and AI agents under a Control Panel. Consent before every outbound action. Voice on paid plans."
         canonical="https://impulsoiq.rinegansolutions.com/"
       />
       <ScrollProgress />
       <NavBar />
       <Hero />
       <LogoStrip />
-      <ImpactStats />
       <HowItWorks />
       <Features />
       <ControlPanelPreview />
-      <Testimonials />
       <CTASection />
       <Footer />
     </div>

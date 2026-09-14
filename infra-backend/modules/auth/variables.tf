@@ -12,6 +12,11 @@ variable "crm_write_service_arn" {
   description = "CRM Write Service Lambda ARN — used by the tenant-provisioner trigger"
 }
 
+variable "crm_read_service_arn" {
+  type        = string
+  description = "CRM Read Lambda ARN — the PreSignUp trigger looks up an existing workspace before admitting a sign-up into it"
+}
+
 # Where Cognito is allowed to send the browser after login/logout.
 #
 # This is a LIST because prod serves both the apex and www, and both must be

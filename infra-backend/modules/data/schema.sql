@@ -31,8 +31,8 @@ CREATE TABLE IF NOT EXISTS tenant (
   -- without rewriting every foreign key.
   subdomain    TEXT        NOT NULL,
   email_domain TEXT,        -- e.g. "acmecorp.com" — used for org-detection during sign-up
-  tier         TEXT        NOT NULL DEFAULT 'starter'
-                 CHECK (tier IN ('starter','growth','enterprise')),
+  tier         TEXT        NOT NULL DEFAULT 'free'
+                 CHECK (tier IN ('free','starter','growth','enterprise')),
   config       JSONB       NOT NULL DEFAULT '{}',
   -- Phase 6D. Declared HERE, not added later: Aurora DSQL's ALTER TABLE ADD
   -- COLUMN grammar is `column_name data_type [STORAGE ...]` and nothing else,
@@ -132,17 +132,22 @@ CREATE TABLE IF NOT EXISTS agent_run (
   id                          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id                   TEXT        NOT NULL REFERENCES tenant(id),
   campaign_id                 UUID        REFERENCES campaign(id),
-  contact_id                  UUID        NOT NULL REFERENCES contact(id),
+  contact_id                  UUID        REFERENCES contact(id),
   agent_type                  TEXT        NOT NULL
-                                CHECK (agent_type IN ('coordinator','clarification',
-                                                      'research_enrichment','outreach',
-                                                      'voice','nurture')),
+                                CHECK (agent_type IN (
+                                  'coordinator','clarification','research_enrichment',
+                                  'outreach','voice','nurture',
+                                  'forecasting_insight','data_hygiene','ambient_interface',
+                                  'deep_research','signal_listening',
+                                  'triage_escalation','resolution','support_insight'
+                                )),
   status                      TEXT        NOT NULL DEFAULT 'pending'
                                 CHECK (status IN ('pending','running','paused',
                                                   'completed','failed')),
   step_functions_execution_arn TEXT,
   input                       JSONB       NOT NULL DEFAULT '{}',
   output                      JSONB,
+  cost_json                   JSONB       NOT NULL DEFAULT '{}',
   error                       TEXT,
   started_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   ended_at                    TIMESTAMPTZ,
@@ -190,6 +195,11 @@ CREATE TABLE IF NOT EXISTS call_result (
   transcript_s3_key TEXT,
   summary_json      JSONB,
   schema_valid      BOOLEAN,
+  ai_disclosure_delivered_at TIMESTAMPTZ,
+  ai_disclosure_text         TEXT,
+  calling_window_allowed     BOOLEAN,
+  calling_window_reason      TEXT,
+  dnc_result                 TEXT,
   occurred_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -284,6 +294,30 @@ ALTER TABLE tenant ADD COLUMN IF NOT EXISTS sso_configured BOOLEAN;
 ALTER TABLE tenant ALTER COLUMN sso_configured SET DEFAULT FALSE;
 ALTER TABLE tenant ADD COLUMN IF NOT EXISTS sso_provider_id TEXT;
 
+-- ── Phase 1 commercial integrity (v5) ────────────────────────────────────────
+-- CREATE TABLE IF NOT EXISTS will not reshape an existing cluster. These ALTERs
+-- are what upgrades a live DSQL database. DROP CONSTRAINT is required to widen
+-- agent_run.agent_type; application code also validates the allowlist.
+ALTER TABLE agent_run ALTER COLUMN contact_id DROP NOT NULL;
+ALTER TABLE agent_run DROP CONSTRAINT IF EXISTS agent_run_agent_type_check;
+-- NOT VALID is required: Aurora DSQL rejects a plain ADD CONSTRAINT. It also
+-- skips re-checking existing rows, which is correct here — this only WIDENS the
+-- allowlist, so every stored row already satisfies it.
+ALTER TABLE agent_run ADD CONSTRAINT agent_run_agent_type_check CHECK (agent_type IN (
+  'coordinator','clarification','research_enrichment',
+  'outreach','voice','nurture',
+  'forecasting_insight','data_hygiene','ambient_interface',
+  'deep_research','signal_listening',
+  'triage_escalation','resolution','support_insight'
+)) NOT VALID;
+ALTER TABLE agent_run ADD COLUMN IF NOT EXISTS cost_json JSONB;
+ALTER TABLE agent_run ALTER COLUMN cost_json SET DEFAULT '{}';
+ALTER TABLE call_result ADD COLUMN IF NOT EXISTS ai_disclosure_delivered_at TIMESTAMPTZ;
+ALTER TABLE call_result ADD COLUMN IF NOT EXISTS ai_disclosure_text TEXT;
+ALTER TABLE call_result ADD COLUMN IF NOT EXISTS calling_window_allowed BOOLEAN;
+ALTER TABLE call_result ADD COLUMN IF NOT EXISTS calling_window_reason TEXT;
+ALTER TABLE call_result ADD COLUMN IF NOT EXISTS dnc_result TEXT;
+
 -- ── Phase 6C: A2A handoff log ──────────────────────────────────────────────────
 -- Records cross-department agent handoff events for audit and observability.
 CREATE TABLE IF NOT EXISTS a2a_handoff (
@@ -302,3 +336,44 @@ CREATE TABLE IF NOT EXISTS a2a_handoff (
 );
 CREATE INDEX ASYNC IF NOT EXISTS idx_a2a_tenant   ON a2a_handoff(tenant_id);
 CREATE INDEX ASYNC IF NOT EXISTS idx_a2a_status   ON a2a_handoff(tenant_id, status);
+
+-- ── Phase 4: attributed enrichment (not a JSON blob on contact) ──────────────
+-- One row per (source, field) observation. Hygiene decay reads fetched_at.
+CREATE TABLE IF NOT EXISTS enrichment_record (
+  id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id     TEXT        NOT NULL REFERENCES tenant(id),
+  contact_id    UUID        REFERENCES contact(id),
+  account_id    UUID        REFERENCES account(id),
+  source        TEXT        NOT NULL,
+  field         TEXT        NOT NULL,
+  value         TEXT,
+  confidence    NUMERIC(4,3) NOT NULL DEFAULT 0
+                  CHECK (confidence >= 0 AND confidence <= 1),
+  fetched_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  decay_policy  TEXT        NOT NULL DEFAULT '90d',
+  metadata      JSONB       NOT NULL DEFAULT '{}',
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX ASYNC IF NOT EXISTS idx_enrichment_tenant  ON enrichment_record(tenant_id);
+CREATE INDEX ASYNC IF NOT EXISTS idx_enrichment_contact ON enrichment_record(tenant_id, contact_id, fetched_at);
+CREATE INDEX ASYNC IF NOT EXISTS idx_enrichment_field   ON enrichment_record(tenant_id, field, fetched_at);
+
+-- ── Phase 4: editable outbound cadence ───────────────────────────────────────
+CREATE TABLE IF NOT EXISTS sequence (
+  id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id   TEXT        NOT NULL REFERENCES tenant(id),
+  name        TEXT        NOT NULL,
+  status      TEXT        NOT NULL DEFAULT 'active'
+                CHECK (status IN ('draft','active','archived')),
+  steps       JSONB       NOT NULL DEFAULT '[]',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX ASYNC IF NOT EXISTS idx_sequence_tenant ON sequence(tenant_id);
+
+-- ── Phase 5: Free is a first-class billed tier (not "starter with fewer calls")
+-- DSQL: DROP+ADD the CHECK. Existing rows stay starter until they pay or we migrate.
+ALTER TABLE tenant DROP CONSTRAINT IF EXISTS tenant_tier_check;
+ALTER TABLE tenant ADD CONSTRAINT tenant_tier_check
+  CHECK (tier IN ('free','starter','growth','enterprise')) NOT VALID;
+ALTER TABLE tenant ALTER COLUMN tier SET DEFAULT 'free';

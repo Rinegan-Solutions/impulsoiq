@@ -9,7 +9,7 @@
  */
 import type { APIGatewayProxyEvent, Handler } from 'aws-lambda';
 import { getDb, closeDb } from './db';
-import { publishEvent } from './events';
+import { publishEvent, recordFirstActivation } from './events';
 
 type Operation =
   | 'upsert_tenant'         // restricted: only tenant-provisioner may call this
@@ -23,6 +23,15 @@ type Operation =
   | 'upsert_call_result'
   | 'upsert_consent_record'
   | 'check_consent'
+  | 'patch_activity'
+  | 'merge_contacts'
+  | 'insert_enrichment_records'
+  | 'upsert_sequence'
+  | 'patch_tenant_config'
+  | 'set_tenant_billing'    // restricted: billing-service only
+  | 'save_sso_intent'
+  | 'patch_expansion_config'
+  | 'erase_dsar'
   // Phase 7: support entities
   | 'upsert_conversation'
   | 'upsert_message'
@@ -58,6 +67,27 @@ function tenantFromEvent(event: APIGatewayProxyEvent): string | null {
     | Record<string, string>
     | undefined;
   return claims?.['custom:tenant_id'] ?? null;
+}
+
+
+// ── Workspace membership ─────────────────────────────────────────────────────
+// custom:tenant_id records the workspace an account ASKED for at sign-up — the
+// browser chose it. Membership is granted only by tenant-provisioner, which adds
+// the account to a Cognito group after checking it may join (it created the
+// workspace, or its verified email domain matches). An account whose
+// provisioning failed or was refused has the claim but no group, and must reach
+// no data at all.
+const WORKSPACE_ROLES = new Set(['admin', 'manager', 'member']);
+
+function hasWorkspaceRole(event: APIGatewayProxyEvent): boolean {
+  const claims = event.requestContext?.authorizer?.claims as Record<string, unknown> | undefined;
+  const raw = claims?.['cognito:groups'];
+  if (raw == null) return false;
+  // The REST Cognito authorizer flattens claims to strings, so a groups array
+  // can arrive bracketed and space- or comma-separated. Tokenise rather than
+  // JSON.parse, and accept a real array too.
+  const values = Array.isArray(raw) ? raw.map(String) : String(raw).split(/[\s,[\]"]+/);
+  return values.some((g) => WORKSPACE_ROLES.has(g));
 }
 
 function iso(d?: unknown): string {
@@ -208,24 +238,108 @@ async function upsertActivity(db: ReturnType<typeof getDb> extends Promise<infer
   return (res.rows[0]?.id ?? p.id) as string;
 }
 
+async function patchActivity(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  const meta = p.metadata && typeof p.metadata === 'object' ? JSON.stringify(p.metadata) : '{}';
+  const res = await db.query(
+    `UPDATE activity
+     SET subject  = COALESCE($3, subject),
+         body     = COALESCE($4, body),
+         metadata = COALESCE(metadata, '{}'::jsonb) || $5::jsonb
+     WHERE id = $1 AND tenant_id = $2
+     RETURNING id`,
+    [p.id, tenantId, p.subject ?? null, p.body ?? null, meta],
+  );
+  if (!res.rows[0]) throw new Error('activity not found');
+  return res.rows[0].id as string;
+}
+
+async function mergeContacts(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  const survivorId = String(p.survivorId ?? '');
+  const duplicateId = String(p.duplicateId ?? '');
+  if (!survivorId || !duplicateId || survivorId === duplicateId) {
+    throw new Error('survivorId and duplicateId must be distinct');
+  }
+  const pair = await db.query(
+    `SELECT id, first_name, last_name, email, phone, title, account_id, linkedin_url, custom_fields
+     FROM contact WHERE tenant_id = $1 AND id IN ($2, $3)`,
+    [tenantId, survivorId, duplicateId],
+  );
+  if (pair.rowCount !== 2) throw new Error('Both contacts must exist in this workspace');
+  const duplicate = pair.rows.find((r) => r.id === duplicateId)!;
+  await db.query(
+    `UPDATE contact SET
+       email        = COALESCE(NULLIF(contact.email, ''), $3),
+       phone        = COALESCE(NULLIF(contact.phone, ''), $4),
+       title        = COALESCE(NULLIF(contact.title, ''), $5),
+       account_id   = COALESCE(contact.account_id, $6),
+       linkedin_url = COALESCE(NULLIF(contact.linkedin_url, ''), $7),
+       updated_at   = NOW()
+     WHERE id = $1 AND tenant_id = $2`,
+    [survivorId, tenantId, duplicate.email, duplicate.phone, duplicate.title,
+     duplicate.account_id, duplicate.linkedin_url],
+  );
+  await db.query(
+    `UPDATE deal SET contact_id = $1, updated_at = NOW()
+     WHERE tenant_id = $2 AND contact_id = $3`,
+    [survivorId, tenantId, duplicateId],
+  );
+  await db.query(
+    `UPDATE activity SET contact_id = $1
+     WHERE tenant_id = $2 AND contact_id = $3`,
+    [survivorId, tenantId, duplicateId],
+  );
+  const merged = {
+    ...(duplicate.custom_fields && typeof duplicate.custom_fields === 'object' ? duplicate.custom_fields as object : {}),
+    mergedInto: survivorId,
+    mergedAt: new Date().toISOString(),
+    mergedFromName: `${duplicate.first_name} ${duplicate.last_name}`,
+  };
+  await db.query(
+    `UPDATE contact SET custom_fields = $3::jsonb, updated_at = NOW()
+     WHERE id = $1 AND tenant_id = $2`,
+    [duplicateId, tenantId, JSON.stringify(merged)],
+  );
+  return survivorId;
+}
+
+const AGENT_TYPES = new Set([
+  'coordinator', 'clarification', 'research_enrichment', 'outreach', 'voice',
+  'nurture', 'forecasting_insight', 'data_hygiene', 'ambient_interface',
+  'deep_research', 'signal_listening', 'triage_escalation', 'resolution',
+  'support_insight',
+]);
+
 async function upsertAgentRun(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  const agentType = String(p.agentType ?? '');
+  if (!AGENT_TYPES.has(agentType)) {
+    throw new Error(`upsert_agent_run: agentType '${agentType}' is not in the roster allowlist`);
+  }
   const res = await db.query(
     `INSERT INTO agent_run (id, tenant_id, campaign_id, contact_id, agent_type,
-       status, step_functions_execution_arn, input, started_at)
+       status, step_functions_execution_arn, input, cost_json, started_at)
      VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5,
-             COALESCE($6,'pending'), $7, COALESCE($8,'{}')::jsonb, NOW())
+             COALESCE($6,'pending'), $7, COALESCE($8,'{}')::jsonb,
+             COALESCE($12,'{}')::jsonb, NOW())
      ON CONFLICT (id) DO UPDATE SET
        status                       = EXCLUDED.status,
-       step_functions_execution_arn = EXCLUDED.step_functions_execution_arn,
+       step_functions_execution_arn = COALESCE(EXCLUDED.step_functions_execution_arn, agent_run.step_functions_execution_arn),
+       input    = COALESCE($8::jsonb, agent_run.input),
        output   = CASE WHEN $9::jsonb IS NOT NULL THEN $9::jsonb ELSE agent_run.output END,
-       error    = COALESCE($10, agent_run.error),
-       ended_at = CASE WHEN $6 IN ('completed','failed') THEN NOW() ELSE agent_run.ended_at END
+       error    = CASE WHEN $11::boolean THEN $10 ELSE agent_run.error END,
+       cost_json = CASE WHEN $12::jsonb IS NOT NULL THEN $12::jsonb ELSE agent_run.cost_json END,
+       ended_at = CASE
+                    WHEN $6 IN ('completed','failed') THEN NOW()
+                    WHEN $6 IN ('running','paused','pending') THEN NULL
+                    ELSE agent_run.ended_at
+                  END
      RETURNING id`,
-    [p.id ?? null, tenantId, p.campaignId ?? null, p.contactId, p.agentType,
+    [p.id ?? null, tenantId, p.campaignId ?? null, p.contactId ?? null, agentType,
      p.status ?? null, p.stepFunctionsExecutionArn ?? null,
      p.input ? JSON.stringify(p.input) : null,
      p.output ? JSON.stringify(p.output) : null,
-     p.error ?? null],
+     p.error === undefined ? null : p.error,
+     p.error !== undefined,
+     p.costJson ? JSON.stringify(p.costJson) : null],
   );
   return res.rows[0].id as string;
 }
@@ -280,22 +394,199 @@ async function upsertWorkspaceTemplate(db: ReturnType<typeof getDb> extends Prom
   return res.rows[0].id as string;
 }
 
+const CALL_OUTCOMES = new Set(['answered', 'voicemail', 'no_answer', 'busy', 'failed']);
+
+function callResultSchemaValid(p: Record<string, unknown>): boolean {
+  const outcome = String(p.outcome ?? '');
+  if (!CALL_OUTCOMES.has(outcome)) return false;
+  if (p.schemaValid === false) return false;
+  if (outcome !== 'answered') return true;
+  const summary = p.summaryJson;
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return false;
+  const s = summary as Record<string, unknown>;
+  return 'interest_level' in s || 'interestLevel' in s || 'meeting_booked' in s || 'meetingBooked' in s;
+}
+
+async function insertEnrichmentRecords(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  const rows = Array.isArray(p.records) ? p.records as Record<string, unknown>[] : [];
+  if (rows.length === 0) throw new Error('insert_enrichment_records: records array is required');
+  let lastId = '';
+  for (const rec of rows.slice(0, 40)) {
+    const conf = Math.min(1, Math.max(0, Number(rec.confidence ?? 0)));
+    const res = await db.query(
+      `INSERT INTO enrichment_record
+         (id, tenant_id, contact_id, account_id, source, field, value, confidence, fetched_at, decay_policy, metadata)
+       VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, COALESCE($9, NOW()), COALESCE($10,'90d'), COALESCE($11,'{}')::jsonb)
+       RETURNING id`,
+      [
+        rec.id ?? null, tenantId, rec.contactId ?? p.contactId ?? null, rec.accountId ?? p.accountId ?? null,
+        rec.source, rec.field, rec.value == null ? null : String(rec.value), conf,
+        rec.fetchedAt ?? null, rec.decayPolicy ?? '90d',
+        rec.metadata ? JSON.stringify(rec.metadata) : '{}',
+      ],
+    );
+    lastId = res.rows[0].id as string;
+  }
+  return lastId;
+}
+
+async function upsertSequence(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  const allowed = new Set(['email', 'sms', 'wait', 'call', 'task']);
+  const rawSteps = Array.isArray(p.steps) ? p.steps as Record<string, unknown>[] : [];
+  const steps = rawSteps.map((step, i) => {
+    const type = String(step.type ?? '');
+    if (!allowed.has(type)) throw new Error(`sequence step ${i}: type must be email, sms, wait, call, or task`);
+    const waitSeconds = type === 'wait' ? Math.max(0, Math.min(86400 * 30, Number(step.waitSeconds ?? 0))) : undefined;
+    return {
+      id: typeof step.id === 'string' && step.id ? step.id : `step-${i + 1}`,
+      type,
+      ...(waitSeconds !== undefined ? { waitSeconds } : {}),
+      ...(typeof step.subject === 'string' ? { subject: step.subject } : {}),
+      ...(typeof step.body === 'string' ? { body: step.body } : {}),
+      ...(typeof step.title === 'string' ? { title: step.title } : {}),
+    };
+  });
+  const res = await db.query(
+    `INSERT INTO sequence (id, tenant_id, name, status, steps)
+     VALUES (COALESCE($1, gen_random_uuid()), $2, $3, COALESCE($4,'active'), $5::jsonb)
+     ON CONFLICT (id) DO UPDATE SET
+       name       = EXCLUDED.name,
+       status     = COALESCE(EXCLUDED.status, sequence.status),
+       steps      = EXCLUDED.steps,
+       updated_at = NOW()
+     RETURNING id`,
+    [p.id ?? null, tenantId, p.name, p.status ?? null, JSON.stringify(steps)],
+  );
+  return res.rows[0].id as string;
+}
+
+function isManagerOrAdmin(event: APIGatewayProxyEvent): boolean {
+  const claims = event.requestContext?.authorizer?.claims as Record<string, unknown> | undefined;
+  const raw = claims?.['cognito:groups'];
+  const values = Array.isArray(raw) ? raw.map(String) : String(raw ?? '').split(/[\s,[\]"]+/);
+  return values.some((g) => g === 'admin' || g === 'manager');
+}
+
+async function patchTenantConfig(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  const profile = p.brandVoiceProfile;
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+    throw new Error('brandVoiceProfile object is required');
+  }
+  const src = profile as Record<string, unknown>;
+  const allowed: Record<string, unknown> = {};
+  for (const key of ['tone', 'persona', 'pillars', 'forbiddenPhrases', 'mailingAddress', 'senderName']) {
+    if (src[key] !== undefined) allowed[key] = src[key];
+  }
+  const current = await db.query(`SELECT COALESCE(config, '{}'::jsonb) AS config FROM tenant WHERE id = $1`, [tenantId]);
+  if (!current.rows[0]) throw new Error('tenant not found');
+  const config = {
+    ...(current.rows[0].config as Record<string, unknown>),
+    brand_voice_profile: allowed,
+  };
+  await db.query(`UPDATE tenant SET config = $2::jsonb, updated_at = NOW() WHERE id = $1`, [tenantId, JSON.stringify(config)]);
+  return tenantId;
+}
+
+const BILLING_TIERS = new Set(['free', 'starter', 'growth', 'enterprise']);
+
+async function setTenantBilling(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  const current = await db.query(`SELECT tier, COALESCE(config, '{}'::jsonb) AS config FROM tenant WHERE id = $1`, [tenantId]);
+  if (!current.rows[0]) throw new Error('tenant not found');
+  const config = { ...(current.rows[0].config as Record<string, unknown>) };
+  if (typeof p.stripeCustomerId === 'string' && p.stripeCustomerId) {
+    config.stripeCustomerId = p.stripeCustomerId;
+  }
+  if (typeof p.stripeSubscriptionId === 'string') {
+    config.stripeSubscriptionId = p.stripeSubscriptionId;
+  }
+  const nextTier = typeof p.tier === 'string' ? p.tier : String(current.rows[0].tier);
+  if (!BILLING_TIERS.has(nextTier)) throw new Error(`invalid tier: ${nextTier}`);
+  await db.query(
+    `UPDATE tenant SET tier = $2, config = $3::jsonb, updated_at = NOW() WHERE id = $1`,
+    [tenantId, nextTier, JSON.stringify(config)],
+  );
+  return tenantId;
+}
+
+async function saveSsoIntent(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  const url = String(p.metadataUrl ?? '').trim();
+  if (!/^https:\/\//i.test(url)) throw new Error('metadataUrl must be an https URL');
+  const provider = String(p.provider ?? 'generic').slice(0, 64);
+  const current = await db.query(`SELECT COALESCE(config, '{}'::jsonb) AS config FROM tenant WHERE id = $1`, [tenantId]);
+  if (!current.rows[0]) throw new Error('tenant not found');
+  const config = {
+    ...(current.rows[0].config as Record<string, unknown>),
+    ssoMetadataUrl: url,
+    ssoProvider: provider,
+    ssoSubmittedAt: new Date().toISOString(),
+  };
+  // sso_configured stays false until an operator attaches the IdP at the pool (sso.tf).
+  await db.query(
+    `UPDATE tenant SET config = $2::jsonb, sso_provider_id = $3, sso_configured = FALSE, updated_at = NOW() WHERE id = $1`,
+    [tenantId, JSON.stringify(config), provider],
+  );
+  return tenantId;
+}
+
+async function patchExpansionConfig(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  const current = await db.query(`SELECT COALESCE(config, '{}'::jsonb) AS config FROM tenant WHERE id = $1`, [tenantId]);
+  if (!current.rows[0]) throw new Error('tenant not found');
+  const config = { ...(current.rows[0].config as Record<string, unknown>) };
+  const prev = (config.expansion && typeof config.expansion === 'object' && !Array.isArray(config.expansion))
+    ? config.expansion as Record<string, unknown>
+    : {};
+  const expansion = { ...prev };
+  if (typeof p.csDesignPartner === 'boolean') expansion.csDesignPartner = p.csDesignPartner;
+  config.expansion = expansion;
+  await db.query(`UPDATE tenant SET config = $2::jsonb, updated_at = NOW() WHERE id = $1`, [tenantId, JSON.stringify(config)]);
+  return tenantId;
+}
+
+async function eraseDsar(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  const contactId = String(p.contactId ?? '');
+  if (!contactId) throw new Error('contactId is required');
+  await db.query(`DELETE FROM enrichment_record WHERE tenant_id = $1 AND contact_id = $2`, [tenantId, contactId]);
+  await db.query(`DELETE FROM consent_record WHERE tenant_id = $1 AND contact_id = $2`, [tenantId, contactId]);
+  await db.query(`DELETE FROM call_result WHERE tenant_id = $1 AND contact_id = $2`, [tenantId, contactId]);
+  await db.query(`DELETE FROM activity WHERE tenant_id = $1 AND contact_id = $2`, [tenantId, contactId]);
+  await db.query(`DELETE FROM agent_run WHERE tenant_id = $1 AND contact_id = $2`, [tenantId, contactId]);
+  await db.query(`UPDATE deal SET contact_id = NULL, updated_at = NOW() WHERE tenant_id = $1 AND contact_id = $2`, [tenantId, contactId]);
+  const del = await db.query(`DELETE FROM contact WHERE tenant_id = $1 AND id = $2 RETURNING id`, [tenantId, contactId]);
+  if ((del.rowCount ?? 0) === 0) throw new Error('contact not found');
+  return contactId;
+}
+
 async function upsertCallResult(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
+  if (!CALL_OUTCOMES.has(String(p.outcome ?? ''))) {
+    throw new Error('malformed_call_result_schema: outcome must be answered, voicemail, no_answer, busy, or failed');
+  }
+  const schemaValid = callResultSchemaValid(p);
+  p.schemaValid = schemaValid;
   const res = await db.query(
     `INSERT INTO call_result (id, tenant_id, agent_run_id, contact_id, call_id,
        idempotency_key, outcome, duration_seconds, transcript_s3_key, summary_json,
-       schema_valid, occurred_at)
+       schema_valid, occurred_at,
+       ai_disclosure_delivered_at, ai_disclosure_text,
+       calling_window_allowed, calling_window_reason, dnc_result)
      VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9,
-             $10::jsonb, $11, COALESCE($12, NOW()))
+             $10::jsonb, $11, COALESCE($12, NOW()),
+             $13::timestamptz, $14, $15, $16, $17)
      ON CONFLICT (idempotency_key) DO NOTHING
      RETURNING id`,
     [p.id ?? null, tenantId, p.agentRunId ?? null, p.contactId, p.callId,
      p.idempotencyKey, p.outcome, p.durationSeconds ?? null,
      p.transcriptS3Key ?? null,
      p.summaryJson ? JSON.stringify(p.summaryJson) : null,
-     p.schemaValid ?? null, p.occurredAt ?? null],
+     p.schemaValid ?? null, p.occurredAt ?? null,
+     p.aiDisclosureDeliveredAt ?? null, p.aiDisclosureText ?? null,
+     p.callingWindowAllowed ?? null, p.callingWindowReason ?? null,
+     p.dncResult == null ? null : (typeof p.dncResult === 'string' ? p.dncResult : JSON.stringify(p.dncResult))],
   );
-  return (res.rows[0]?.id ?? p.id) as string;
+  const id = (res.rows[0]?.id ?? p.id) as string;
+  if (!schemaValid) {
+    throw new Error('malformed_call_result_schema: answered calls require interest_level or meeting_booked in summaryJson');
+  }
+  return id;
 }
 
 async function upsertConsentRecord(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
@@ -333,22 +624,30 @@ async function checkConsent(db: ReturnType<typeof getDb> extends Promise<infer T
 }
 
 async function upsertTenant(db: ReturnType<typeof getDb> extends Promise<infer T> ? T : never, tenantId: string, p: Record<string, unknown>) {
-  // tenantId IS the row's id for tenant creation (first-class identifier).
-  // (xmax = 0) is true for fresh inserts — lets the caller know if this is a new workspace.
-  const res = await db.query(
+  // CREATE IF ABSENT — never overwrite.
+  //
+  // This was ON CONFLICT DO UPDATE setting name, tier and config from the
+  // payload. tenant-provisioner calls it for EVERY confirmed sign-up, including
+  // people joining an existing workspace, so each join reset the workspace's
+  // name to its slug, its tier to 'starter' and its config to {}. It also
+  // detected a fresh insert with (xmax = 0), a PostgreSQL system column that
+  // Aurora DSQL does not document. rowCount from DO NOTHING ... RETURNING, plus a
+  // read when nothing was inserted, needs neither.
+  const inserted = await db.query(
     `INSERT INTO tenant (id, name, subdomain, email_domain, tier, config)
-     VALUES ($1, $2, $3, $4, COALESCE($5,'starter'), COALESCE($6,'{}')::jsonb)
-     ON CONFLICT (id) DO UPDATE SET
-       name         = EXCLUDED.name,
-       email_domain = COALESCE(EXCLUDED.email_domain, tenant.email_domain),
-       tier         = EXCLUDED.tier,
-       config       = EXCLUDED.config,
-       updated_at   = NOW()
-     RETURNING id, (xmax = 0) AS was_inserted`,
+     VALUES ($1, $2, $3, $4, COALESCE($5,'free'), COALESCE($6,'{}')::jsonb)
+     ON CONFLICT (id) DO NOTHING
+     RETURNING id`,
     [tenantId, p.name ?? tenantId, p.subdomain ?? tenantId, p.emailDomain ?? null,
      p.tier ?? null, p.config ? JSON.stringify(p.config) : null],
   );
-  return res.rows[0] as { id: string; was_inserted: boolean };
+  if ((inserted.rowCount ?? 0) > 0) {
+    return { id: tenantId, was_inserted: true, email_domain: (p.emailDomain as string | null | undefined) ?? null };
+  }
+  // The provisioner needs the EXISTING domain to decide whether this account may join.
+  const existing = await db.query(`SELECT email_domain FROM tenant WHERE id = $1`, [tenantId]);
+  const row = existing.rows[0] as { email_domain?: string | null } | undefined;
+  return { id: tenantId, was_inserted: false, email_domain: row?.email_domain ?? null };
 }
 
 // ── Entry point (API Gateway + direct Lambda invocation from agents) ──────────
@@ -369,6 +668,9 @@ const dispatch: Handler<
     const apigwEvent = event as APIGatewayProxyEvent;
     tenantId = tenantFromEvent(apigwEvent);
     if (!tenantId) return { statusCode: 401, body: JSON.stringify({ error: 'Missing tenant_id' }) };
+    if (!hasWorkspaceRole(apigwEvent)) {
+      return { statusCode: 403, body: JSON.stringify({ error: 'This account has not been granted access to its workspace' }) };
+    }
 
     const mismatch = assertTenantMatchesHost(apigwEvent, tenantId);
     if (mismatch) return { statusCode: 403, body: JSON.stringify({ error: mismatch }) };
@@ -389,6 +691,7 @@ const dispatch: Handler<
     const db = await getDb();
     let entityId: string;
     let entityType: string;
+    let extra: Record<string, unknown> = {};
 
     switch (operation) {
       case 'check_consent':
@@ -408,7 +711,7 @@ const dispatch: Handler<
         entityId   = tenantResult.id;
         entityType = 'tenant';
         // Surface wasInserted so the provisioner knows admin vs member assignment
-        return { ok: true, id: entityId, wasInserted: tenantResult.was_inserted };
+        return { ok: true, id: entityId, wasInserted: tenantResult.was_inserted, emailDomain: tenantResult.email_domain };
 
       case 'upsert_contact':
         entityId   = await upsertContact(db, tenantId, payload);
@@ -430,6 +733,19 @@ const dispatch: Handler<
         entityType = 'activity';
         break;
 
+      case 'patch_activity':
+        entityId   = await patchActivity(db, tenantId, payload);
+        entityType = 'activity';
+        break;
+
+      case 'merge_contacts':
+        if ('requestContext' in (event as object)) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'merge_contacts requires the Approvals controller, not a direct CRM write' }) };
+        }
+        entityId   = await mergeContacts(db, tenantId, payload);
+        entityType = 'contact';
+        break;
+
       case 'upsert_agent_run':
         entityId   = await upsertAgentRun(db, tenantId, payload);
         entityType = 'agent_run';
@@ -448,6 +764,62 @@ const dispatch: Handler<
       case 'upsert_call_result':
         entityId   = await upsertCallResult(db, tenantId, payload);
         entityType = 'call_result';
+        extra = { schemaValid: payload.schemaValid === true };
+        break;
+
+      case 'insert_enrichment_records':
+        entityId   = await insertEnrichmentRecords(db, tenantId, payload);
+        entityType = 'enrichment_record';
+        break;
+
+      case 'upsert_sequence':
+        entityId   = await upsertSequence(db, tenantId, payload);
+        entityType = 'sequence';
+        break;
+
+      case 'patch_tenant_config':
+        if ('requestContext' in event && !isManagerOrAdmin(event as APIGatewayProxyEvent)) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'Only admins and managers can edit brand voice' }) };
+        }
+        entityId   = await patchTenantConfig(db, tenantId, payload);
+        entityType = 'tenant';
+        break;
+
+      case 'set_tenant_billing':
+        if ('requestContext' in event) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'billing mutations require the billing service' }) };
+        }
+        if (req.actorId !== 'billing-service') {
+          return { ok: false, error: 'set_tenant_billing: caller must identify as billing-service' };
+        }
+        entityId   = await setTenantBilling(db, tenantId, payload);
+        entityType = 'tenant';
+        extra = { tier: payload.tier };
+        break;
+
+      case 'save_sso_intent':
+        if (!('requestContext' in event) || !isManagerOrAdmin(event as APIGatewayProxyEvent)) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'Only admins and managers can submit SSO metadata' }) };
+        }
+        entityId   = await saveSsoIntent(db, tenantId, payload);
+        entityType = 'tenant';
+        break;
+
+      case 'patch_expansion_config':
+        if (!('requestContext' in event) || !isManagerOrAdmin(event as APIGatewayProxyEvent)) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'Only admins and managers can set expansion flags' }) };
+        }
+        entityId   = await patchExpansionConfig(db, tenantId, payload);
+        entityType = 'tenant';
+        break;
+
+      case 'erase_dsar':
+        if (!('requestContext' in event) || !isManagerOrAdmin(event as APIGatewayProxyEvent)) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'Only admins and managers can erase a data subject' }) };
+        }
+        entityId   = await eraseDsar(db, tenantId, payload);
+        entityType = 'contact';
+        extra = { erased: true };
         break;
 
       case 'upsert_consent_record':
@@ -602,13 +974,32 @@ const dispatch: Handler<
     // Publish audit event to DynamoDB (non-blocking on success)
     await publishEvent({
       tenantId, entityType, entityId,
-      eventType: payload.id ? 'updated' : 'created',
+      eventType: operation === 'erase_dsar' ? 'deleted' : (payload.id ? 'updated' : 'created'),
       actorType: actorType as 'human' | 'agent',
       actorId,
       data: { ...payload, operation },
+      // Flattened so appsync-publisher can read them without unmarshalling `data`.
+      agentType: typeof payload.agentType === 'string' ? payload.agentType : undefined,
+      status: typeof payload.status === 'string' ? payload.status : undefined,
     });
 
-    return { ok: true, id: entityId };
+    if (entityType === 'activity') {
+      const meta = (payload.metadata && typeof payload.metadata === 'object')
+        ? payload.metadata as Record<string, unknown> : {};
+      const awaiting = meta.status === 'awaiting_approval';
+      if (!awaiting && (payload.type === 'email' || payload.type === 'sms')) {
+        await recordFirstActivation(tenantId, 'first_outbound_sent', {
+          activityId: entityId, type: payload.type,
+        });
+      }
+      if (payload.type === 'call') {
+        await recordFirstActivation(tenantId, 'first_call_placed', {
+          activityId: entityId,
+        });
+      }
+    }
+
+    return { ok: true, id: entityId, result: extra };
 
   } catch (err) {
     // If it's an OCC error from DSQL, surface it so callers can retry

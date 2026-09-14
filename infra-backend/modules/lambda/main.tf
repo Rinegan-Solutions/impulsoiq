@@ -7,16 +7,19 @@ locals {
   crm_read_service_arn  = "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${var.project}-crm-read-${var.env}"
 
   functions = {
-    crm-write-service   = { handler = "handler.handler", timeout = 30, memory = 256 }
-    crm-read            = { handler = "handler.handler", timeout = 15, memory = 256 }
-    auth-authorizer     = { handler = "handler.handler", timeout = 10, memory = 128 }
-    webhook-handler     = { handler = "handler.handler", timeout = 30, memory = 256 }
-    campaign-trigger    = { handler = "handler.handler", timeout = 60, memory = 512 }
-    org-check           = { handler = "handler.handler", timeout = 10, memory = 128 }
-    lead-router         = { handler = "handler.handler", timeout = 30, memory = 256 }
-    send-pause-enforcer = { handler = "handler.handler", timeout = 15, memory = 128 }
-    appsync-publisher   = { handler = "handler.handler", timeout = 30, memory = 256 }
-    nurture-trigger     = { handler = "handler.handler", timeout = 30, memory = 256 }
+    crm-write-service    = { handler = "handler.handler", timeout = 30, memory = 256 }
+    crm-read             = { handler = "handler.handler", timeout = 15, memory = 256 }
+    auth-authorizer      = { handler = "handler.handler", timeout = 10, memory = 128 }
+    webhook-handler      = { handler = "handler.handler", timeout = 30, memory = 256 }
+    campaign-trigger     = { handler = "handler.handler", timeout = 60, memory = 512 }
+    sequence-step        = { handler = "handler.handler", timeout = 10, memory = 128 }
+    execution-controller = { handler = "handler.handler", timeout = 60, memory = 256 }
+    intent-service       = { handler = "handler.handler", timeout = 120, memory = 512 }
+    org-check            = { handler = "handler.handler", timeout = 10, memory = 128 }
+    lead-router          = { handler = "handler.handler", timeout = 30, memory = 256 }
+    send-pause-enforcer  = { handler = "handler.handler", timeout = 15, memory = 128 }
+    appsync-publisher    = { handler = "handler.handler", timeout = 30, memory = 256 }
+    nurture-trigger      = { handler = "handler.handler", timeout = 30, memory = 256 }
     # Phase 3
     metering-aggregator = { handler = "handler.handler", timeout = 60, memory = 256 }
     evaluations-runner  = { handler = "handler.handler", timeout = 300, memory = 512 }
@@ -24,6 +27,7 @@ locals {
     voice-bridge = { handler = "handler.handler", timeout = 900, memory = 512 }
     # Phase 5
     template-launcher = { handler = "handler.handler", timeout = 30, memory = 256 }
+    billing-service   = { handler = "handler.handler", timeout = 30, memory = 256 }
     # Phase 6
     registry-seeder = { handler = "handler.handler", timeout = 60, memory = 256 }
     a2a-handoff     = { handler = "handler.handler", timeout = 60, memory = 256 }
@@ -127,6 +131,7 @@ resource "aws_iam_role_policy" "lambda" {
         Effect = "Allow"
         Action = [
           "states:StartExecution", "states:DescribeExecution",
+          "states:StopExecution",
           "states:SendTaskSuccess", "states:SendTaskFailure",
           "states:SendTaskHeartbeat",
         ]
@@ -164,6 +169,12 @@ resource "aws_iam_role_policy" "lambda" {
         Effect   = "Allow"
         Action   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"]
         Resource = "arn:aws:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project}/${var.env}/*"
+      },
+      {
+        Sid      = "AppSecretRead"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = var.app_secret_arn
       },
       {
         # @aws-sdk/client-dsql + DsqlSigner — used by crm-read, crm-write-service,
@@ -233,6 +244,7 @@ resource "aws_lambda_function" "fn" {
         DSQL_ENDPOINT  = var.dsql_endpoint
         DYNAMODB_TABLE = var.dynamodb_table
         ENV            = var.env
+        APP_SECRET_ARN = var.app_secret_arn
         # Authorizer reads pool ID from SSM at cold start — no auth→lambda dep cycle
         USER_POOL_ID_SSM_PATH = "/impulsoiq/${var.env}/backend/cognito_user_pool_id"
         CRM_WRITE_SERVICE_ARN = local.crm_write_service_arn
@@ -247,15 +259,31 @@ resource "aws_lambda_function" "fn" {
         # SSM path resolved at cold start — no module dependency needed
         APPSYNC_URL_SSM_PATH = "/impulsoiq/${var.env}/backend/appsync_url"
       } : {},
-      contains(["lead-router", "campaign-trigger", "webhook-handler"], each.key) ? {
-        STATE_MACHINE_ARN_SSM_PATH = "/impulsoiq/${var.env}/backend/state_machine_arn"
-      } : {},
-      contains(["metering-aggregator", "evaluations-runner"], each.key) ? {
+      contains(["metering-aggregator", "evaluations-runner", "crm-read", "billing-service"], each.key) ? {
         METERING_TABLE  = var.metering_table
         REPORTING_TABLE = var.reporting_table
       } : {},
+      each.key == "billing-service" ? {
+        STRIPE_PRICE_STARTER_MONTHLY         = var.stripe_price_starter_monthly
+        STRIPE_PRICE_STARTER_ANNUAL          = var.stripe_price_starter_annual
+        STRIPE_PRICE_GROWTH_MONTHLY          = var.stripe_price_growth_monthly
+        STRIPE_PRICE_GROWTH_ANNUAL           = var.stripe_price_growth_annual
+        STRIPE_PRICE_PACK_CALL_MINUTES       = var.stripe_price_pack_call_minutes
+        STRIPE_PRICE_PACK_ENRICHMENT_LOOKUPS = var.stripe_price_pack_enrichment
+        STRIPE_PRICE_PACK_CONCURRENT_RUNS    = var.stripe_price_pack_concurrent_runs
+      } : {},
+      contains(["lead-router", "campaign-trigger", "webhook-handler", "execution-controller", "intent-service", "template-launcher"], each.key) ? {
+        STATE_MACHINE_ARN_SSM_PATH = "/impulsoiq/${var.env}/backend/state_machine_arn"
+      } : {},
+      each.key == "intent-service" ? {
+        AGENT_INVOKER_ARN          = "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${var.project}-agent-invoker-${var.env}"
+        CLARIFICATION_ARN_SSM_PATH = "/impulsoiq/${var.env}/backend/clarification_agent_arn"
+        DEEP_RESEARCH_ARN_SSM_PATH = "/impulsoiq/${var.env}/backend/deep_research_agent_arn"
+      } : {},
       each.key == "voice-bridge" ? {
         AMBIENT_AGENT_ARN_SSM_PATH = "/impulsoiq/${var.env}/backend/ambient_agent_arn"
+        # $connect verifies the browser's ID token; its audience is the web client.
+        USER_POOL_CLIENT_ID_SSM_PATH = "/impulsoiq/${var.env}/backend/cognito_client_id"
       } : {},
       each.key == "a2a-handoff" ? {
         TEMPLATE_LAUNCHER_ARN = "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${var.project}-template-launcher-${var.env}"
@@ -263,6 +291,9 @@ resource "aws_lambda_function" "fn" {
       each.key == "connect-intake" ? {
         TRIAGE_AGENT_ARN_SSM_PATH     = "/impulsoiq/${var.env}/backend/triage_agent_arn"
         RESOLUTION_AGENT_ARN_SSM_PATH = "/impulsoiq/${var.env}/backend/resolution_agent_arn"
+      } : {},
+      each.key == "execution-controller" ? {
+        CALLE_BASE_URL = var.calle_base_url
       } : {},
       each.key == "csat-capture" ? {
         CONNECT_INTAKE_ARN = "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${var.project}-connect-intake-${var.env}"

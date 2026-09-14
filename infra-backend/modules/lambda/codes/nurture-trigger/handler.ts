@@ -85,6 +85,33 @@ export const handler: SNSHandler = async (event) => {
     }
 
     const eventType = sesEvent.eventType ?? 'unknown';
+    const kind = eventType.toLowerCase();
+
+    if (kind === 'bounce' || kind === 'complaint') {
+      const writeArn = process.env.CRM_WRITE_SERVICE_ARN;
+      if (writeArn) {
+        await lambda.send(new InvokeCommand({
+          FunctionName: writeArn,
+          InvocationType: 'Event',
+          Payload: Buffer.from(JSON.stringify({
+            operation: 'upsert_activity',
+            tenantId,
+            actorType: 'agent',
+            actorId: 'nurture-trigger',
+            payload: {
+              contactId,
+              type: 'note',
+              actorType: 'agent',
+              actorId: 'nurture-trigger',
+              subject: kind === 'bounce' ? 'Email bounced' : 'Complaint received',
+              body: `SES ${kind} for this contact. Deliverability risk — sequence should not keep sending blindly.`,
+              metadata: { kind: kind === 'bounce' ? 'bounce' : 'complaint', eventType },
+            },
+          })),
+        }));
+      }
+      continue;
+    }
 
     // Only trigger on positive engagement signals — not bounces/complaints
     const POSITIVE_EVENTS = new Set(['open', 'click', 'reply']);

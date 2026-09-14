@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ArrowLeft, ArrowRight, Users, Plus } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { signUp } from '@/lib/auth/cognito';
+import { signUp, authErrorMessage, passwordProblem } from '@/lib/auth/cognito';
 // Shared with the CloudFront function and the tenant.id CHECK constraint —
 // all three must agree or a workspace can be created that is unreachable at
 // its own address.
@@ -16,17 +16,12 @@ import {
 const PANEL = (
   <BrandPanel
     heading="Your AI sales team is one workspace away."
-    sub="Join 200+ revenue teams using ImpulsoIQ agents to research, outreach, and qualify leads — automatically."
+    sub="ImpulsoIQ agents research, reach out to, and qualify leads — and log every step to your CRM."
     bullets={[
-      'Deploy your first AI SDR in under 10 minutes',
-      'No credit card required — start free',
-      'Full team access, unlimited campaigns',
+      'Your own workspace at a dedicated address',
+      'Colleagues join by signing up with their work email',
+      'Approval gates before high-stakes outreach',
     ]}
-    quote={{
-      text: "The AI voice calls book meetings we'd never land manually. Our whole team was surprised by the quality.",
-      author: 'Amara Mensah',
-      role: 'Founder · Northvault',
-    }}
   />
 );
 
@@ -115,17 +110,18 @@ export default function SignUp() {
       else if (isReservedSlug(slug)) errs.workspace = `"${slug}" is reserved. Please choose another name.`;
       else if (!isValidSlug(slug))   errs.workspace = 'Use 2-40 letters, numbers or hyphens.';
     }
-    if (password.length < 12) errs.password  = 'Password must be at least 12 characters.';
+    const pwProblem = passwordProblem(password);
+    if (pwProblem)             errs.password  = pwProblem;
     if (confirm !== password)  errs.confirm   = 'Passwords do not match.';
     if (Object.keys(errs).length) { setErrors(errs); return; }
     setErrors({}); setGlobalError(''); setLoading(true);
 
     try {
       const tenantId = toSlug(workspace) || toSlug(email.split('@')[0]);
-      await signUp(email, password, tenantId);
-      navigate(`/verify?email=${encodeURIComponent(email)}`);
+      await signUp(email.trim(), password, tenantId, name.trim(), workspace.trim());
+      navigate(`/verify?email=${encodeURIComponent(email.trim())}`);
     } catch (err) {
-      setGlobalError((err as Error).message ?? 'Sign-up failed. Please try again.');
+      setGlobalError(authErrorMessage(err, 'Sign-up failed. Please try again.'));
     } finally {
       setLoading(false);
     }
@@ -136,17 +132,18 @@ export default function SignUp() {
     e.preventDefault();
     if (!selectedTenant) return;
     const errs: Record<string, string> = {};
-    if (password.length < 12) errs.password = 'Password must be at least 12 characters.';
+    const pwProblem = passwordProblem(password);
+    if (pwProblem)             errs.password = pwProblem;
     if (confirm !== password)  errs.confirm  = 'Passwords do not match.';
     if (Object.keys(errs).length) { setErrors(errs); return; }
     setErrors({}); setGlobalError(''); setLoading(true);
 
     try {
       // tenant_id = existing workspace subdomain; provisioner will assign 'member'
-      await signUp(email, password, selectedTenant.subdomain);
-      navigate(`/verify?email=${encodeURIComponent(email)}`);
+      await signUp(email.trim(), password, selectedTenant.subdomain, name.trim());
+      navigate(`/verify?email=${encodeURIComponent(email.trim())}`);
     } catch (err) {
-      setGlobalError((err as Error).message ?? 'Sign-up failed. Please try again.');
+      setGlobalError(authErrorMessage(err, 'Sign-up failed. Please try again.'));
     } finally {
       setLoading(false);
     }
@@ -269,8 +266,8 @@ export default function SignUp() {
               <PrimaryBtn type="submit" loading={loading}>Create workspace →</PrimaryBtn>
               <p className="text-center text-[0.72rem] text-slate-400 dark:text-slate-600">
                 By continuing you agree to our{' '}
-                <a href="/terms" className="text-indigo-500 hover:underline">Terms</a> and{' '}
-                <a href="/privacy" className="text-indigo-500 hover:underline">Privacy Policy</a>.
+                <Link to="/terms" className="text-indigo-500 hover:underline">Terms</Link> and{' '}
+                <Link to="/privacy" className="text-indigo-500 hover:underline">Privacy Policy</Link>.
               </p>
             </form>
             <button onClick={() => setStep(orgTenants.length > 0 ? 'org-choice' : 'email')}
@@ -292,7 +289,7 @@ export default function SignUp() {
                 <p className="text-[0.75rem] text-indigo-600 dark:text-indigo-400">{selectedTenant.subdomain}.{ZONE}</p>
               </div>
             </div>
-            <AuthHeading title="Set your password" sub={`You'll be added as a member of ${selectedTenant.name}. A workspace admin will see your request.`} />
+            <AuthHeading title="Set your password" sub={`Your ${email.split('@')[1]} address lets you join ${selectedTenant.name} as a member.`} />
             <form onSubmit={handleJoin} className="flex flex-col gap-4" noValidate>
               <PasswordField
                 label="Password" value={password}

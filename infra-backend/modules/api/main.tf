@@ -60,9 +60,21 @@ resource "aws_appsync_resolver" "publish_agent_action" {
   }
 
   code = file("${path.module}/resolvers/publish-agent-action.js")
+}
 
-  # The schema is an argument on aws_appsync_graphql_api, so the resolver's
-  # dependency on it is already implied through api_id — no depends_on needed.
+resource "aws_appsync_resolver" "on_agent_action" {
+  api_id      = aws_appsync_graphql_api.main.id
+  type        = "Subscription"
+  field       = "onAgentAction"
+  data_source = aws_appsync_datasource.none.name
+  kind        = "UNIT"
+
+  runtime {
+    name            = "APPSYNC_JS"
+    runtime_version = "1.0.0"
+  }
+
+  code = file("${path.module}/resolvers/on-agent-action.js")
 }
 
 data "aws_region" "current" {}

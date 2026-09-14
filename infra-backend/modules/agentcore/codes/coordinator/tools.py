@@ -8,6 +8,7 @@ Rules enforced here:
 """
 import json
 import os
+import uuid
 import boto3
 from strands import tool
 
@@ -84,6 +85,7 @@ def start_campaign_execution(
                 "tenantId":    tenant_id,
                 "campaignId":  campaign_id,
                 "contactId":   cid,
+                "agentRunId":  str(uuid.uuid4()),
             }),
         )
         arns.append(resp["executionArn"])
@@ -104,14 +106,27 @@ def check_metering_quota(tenant_id: str, resource: str, amount: int = 1) -> dict
     If allowed is False, the Coordinator must route to a human escalation path.
     """
     import datetime
-    metering_table = os.environ.get("DYNAMODB_TABLE", "")  # shared table includes metering keys
-    metering_specific = os.environ.get("METERING_TABLE", metering_table)
+    metering_specific = os.environ.get("METERING_TABLE", "") or os.environ.get("DYNAMODB_TABLE", "")
+    closed_resources = {"call_minutes", "enrichment_lookups", "email_sends", "sms_sends", "agent_runs", "concurrent_runs"}
+    fail_open = os.environ.get("METERING_FAIL_OPEN", "").lower() == "true" and os.environ.get("ENV") != "prod"
+
+    if not metering_specific:
+        if fail_open and resource not in closed_resources:
+            return {"allowed": True, "remaining": 0, "resource": resource, "failedOpen": True}
+        return {
+            "allowed": False,
+            "remaining": 0,
+            "resource": resource,
+            "failedClosed": True,
+            "reason": "METERING_TABLE is not configured",
+        }
 
     # Per-tier quota limits (Phase 3C defines these)
     TIER_QUOTAS: dict = {
-        "starter":    {"llm_tokens": 100_000,   "call_minutes": 10,  "enrichment_lookups": 100,  "email_sends": 1_000,  "agent_runs": 100},
-        "growth":     {"llm_tokens": 1_000_000, "call_minutes": 100, "enrichment_lookups": 1_000, "email_sends": 10_000, "agent_runs": 1_000},
-        "enterprise": {"llm_tokens": 10_000_000,"call_minutes": 500, "enrichment_lookups": 5_000, "email_sends": 100_000,"agent_runs": 10_000},
+        "free":       {"llm_tokens": 20_000,     "call_minutes": 0,   "enrichment_lookups": 25,    "email_sends": 50,     "sms_sends": 0,      "agent_runs": 20,     "concurrent_runs": 1},
+        "starter":    {"llm_tokens": 100_000,    "call_minutes": 10,  "enrichment_lookups": 100,   "email_sends": 1_000,  "sms_sends": 0,      "agent_runs": 100,    "concurrent_runs": 3},
+        "growth":     {"llm_tokens": 1_000_000,  "call_minutes": 100, "enrichment_lookups": 1_000, "email_sends": 10_000, "sms_sends": 2_000,  "agent_runs": 1_000,  "concurrent_runs": 10},
+        "enterprise": {"llm_tokens": 10_000_000, "call_minutes": 500, "enrichment_lookups": 5_000, "email_sends": 100_000,"sms_sends": 10_000, "agent_runs": 10_000, "concurrent_runs": 50},
     }
 
     period = datetime.datetime.utcnow().strftime("%Y-%m")
@@ -127,11 +142,31 @@ def check_metering_quota(tenant_id: str, resource: str, amount: int = 1) -> dict
         })
         item  = resp.get("Item", {})
         used  = int(item.get("count", 0))
-        quota = int(item.get("quota", TIER_QUOTAS["starter"].get(resource, 1_000)))
+        tier = "free"
+        try:
+            crm_read = os.environ.get("CRM_READ_SERVICE_ARN", "")
+            if crm_read:
+                tenant_resp = _lambda.invoke(
+                    FunctionName=crm_read,
+                    InvocationType="RequestResponse",
+                    Payload=json.dumps({
+                        "operation": "get_tenant",
+                        "payload": {},
+                        "tenantId": tenant_id,
+                    }).encode(),
+                )
+                tenant_body = json.loads(tenant_resp["Payload"].read())
+                row = tenant_body.get("result") or {}
+                if row.get("tier"):
+                    tier = str(row["tier"])
+        except Exception as te:
+            print(f"WARN: tenant tier lookup failed, using free: {te}")
+            tier = "free"
+        defaults = TIER_QUOTAS.get(tier, TIER_QUOTAS["free"])
+        quota = int(item.get("quota", defaults.get(resource, 0)))
 
-        # If quota not yet initialised in the table, default to starter tier
         if not item:
-            quota = TIER_QUOTAS["starter"].get(resource, 1_000)
+            quota = defaults.get(resource, 0)
 
         remaining = max(0, quota - used)
         allowed   = (used + amount) <= quota
@@ -145,10 +180,14 @@ def check_metering_quota(tenant_id: str, resource: str, amount: int = 1) -> dict
             "period":    period,
         }
     except Exception as e:
-        # If metering table is unavailable, fail open to avoid blocking agents
-        # but log the error for alerting
-        print(f"WARNING: check_metering_quota failed — failing open: {e}")
-        return {"allowed": True, "remaining": 9999, "resource": resource, "failedOpen": True}
+        print(f"ERROR: check_metering_quota failed — failing closed: {e}")
+        return {
+            "allowed": False,
+            "remaining": 0,
+            "resource": resource,
+            "failedClosed": True,
+            "reason": str(e),
+        }
 
 
 @tool
@@ -283,28 +322,46 @@ def check_send_pause(tenant_id: str) -> dict:
     a CloudWatch alarm on SES Reputation.BounceRate > 5% or
     Reputation.ComplaintRate > 0.1%).
     """
+    """
+    Check whether the tenant's outbound messaging is currently paused due to a
+    SES reputation event or an account-wide kill.
+
+    Returns { paused: bool, reason?: str, pausedAt?: str }.
+    Fail closed in production if the table cannot be read.
+    """
     import boto3
-    import datetime
-    ddb = boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION", "eu-west-2"))
-    table = ddb.Table(os.environ.get("DYNAMODB_TABLE", ""))
-    response = table.get_item(Key={
-        "pk": f"{tenant_id}#send_flags#send_pause",
-        "sk": "current",
-    })
-    item = response.get("Item")
-    if not item:
+    ddb_table = os.environ.get("DYNAMODB_TABLE", "")
+    if not ddb_table:
+        if os.environ.get("ENV") == "prod":
+            return {"paused": True, "reason": "send_pause_table_unconfigured"}
         return {"paused": False}
-    # Check if the flag has expired (24h TTL)
-    paused_at = item.get("pausedAt", "")
-    if paused_at:
+    ddb = boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION", "eu-west-2"))
+    table = ddb.Table(ddb_table)
+    for pk in (f"{tenant_id}#send_flags#send_pause", "global#send_flags#send_pause"):
         try:
-            paused_dt = datetime.datetime.fromisoformat(paused_at.replace("Z", "+00:00"))
-            if (datetime.datetime.now(datetime.timezone.utc) - paused_dt).total_seconds() > 86400:
-                return {"paused": False, "reason": "flag_expired"}
-        except ValueError:
-            pass
-    return {
-        "paused":   bool(item.get("paused", False)),
-        "reason":   item.get("reason", "reputation"),
-        "pausedAt": paused_at,
-    }
+            response = table.get_item(Key={"pk": pk, "sk": "current"})
+        except Exception as exc:
+            if os.environ.get("ENV") == "prod":
+                return {"paused": True, "reason": f"send_pause_check_failed:{exc}"}
+            continue
+        item = response.get("Item")
+        if not item or not item.get("paused"):
+            continue
+        reason = item.get("reason", "reputation")
+        # account_kill is not a 24h SES alarm; it holds until explicitly cleared.
+        if reason != "account_kill":
+            paused_at = item.get("pausedAt", "")
+            if paused_at:
+                try:
+                    import datetime
+                    paused_dt = datetime.datetime.fromisoformat(paused_at.replace("Z", "+00:00"))
+                    if (datetime.datetime.now(datetime.timezone.utc) - paused_dt).total_seconds() > 86400:
+                        continue
+                except ValueError:
+                    pass
+        return {
+            "paused": True,
+            "reason": reason,
+            "pausedAt": item.get("pausedAt", ""),
+        }
+    return {"paused": False}

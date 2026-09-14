@@ -83,6 +83,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
               transcriptS3Key:  body.transcriptS3Key ?? body.transcriptUrl ?? null,
               summaryJson:      body.summaryJson ?? {},
               idempotencyKey:   body.idempotencyKey,
+              aiDisclosureDeliveredAt: (res.Item.aiDisclosureDeliveredAt as string | undefined) ?? null,
+              aiDisclosureText: (res.Item.aiDisclosureText as string | undefined) ?? null,
+              callingWindowAllowed: Boolean(res.Item.callingWindowAllowed ?? true),
+              callingWindowReason: (res.Item.callingWindowReason as string | undefined) ?? '',
+              dncResult: res.Item.dncResult ?? null,
             }),
           }));
         }

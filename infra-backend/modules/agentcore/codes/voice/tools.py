@@ -14,19 +14,22 @@ Async call lifecycle (CRITICAL — read carefully):
 
 Rules:
 - validate_calling_window MUST pass before placing a call.
-- check_dnc_registry MUST be called before placing a call (stub in Phase 2).
+- check_dnc_registry MUST be called before placing a call (fail closed).
 - place_call_via_calle stores the taskToken — this is how async resumption works.
 - write_call_result is called by ProcessCallResult state, not by this agent directly.
 """
 import json
 import os
-import time
-import httpx
 import boto3
+# Aliased: place_call_via_calle takes a `timezone` STRING parameter (the
+# contact's IANA zone), which shadows a bare `timezone` import inside that
+# function. Importing under a distinct name keeps datetime.timezone.utc
+# reachable there.
+from datetime import datetime, timezone as dt_timezone
 from strands import tool
+from .provider import AI_DISCLOSURE, check_dnc, get_provider, store_call_task
 
-_lambda = boto3.client("lambda",   region_name=os.environ.get("AWS_REGION", "eu-west-2"))
-_ddb    = boto3.client("dynamodb", region_name=os.environ.get("AWS_REGION", "eu-west-2"))
+_lambda = boto3.client("lambda", region_name=os.environ.get("AWS_REGION", "eu-west-2"))
 
 
 def _invoke_lambda(function_arn: str, payload: dict) -> dict:
@@ -118,14 +121,13 @@ def check_dnc_registry(phone_number: str, country: str) -> dict:
     """
     Check if the phone number is on a Do Not Call registry.
 
-    Phase 2 stub — logs the check and returns allowed=true for all numbers.
-    Phase 3: integrate with Neustar / Telnyx DNC scrubbing API.
+    Fail closed: without a DNC provider, only numbers on DNC_TEST_NUMBERS
+    (internal E.164 allowlist) are permitted. Tenant-imported lists cannot
+    bypass this check.
 
-    Returns { allowed: bool, reason?: str }
+    Returns { allowed: bool, reason?: str, source: str }
     """
-    # Phase 2 stub — real DNC scrubbing in Phase 3
-    print(f"DNC check (stub): {phone_number} country={country}")
-    return {"allowed": True, "source": "stub_phase2"}
+    return check_dnc(phone_number, country)
 
 
 @tool
@@ -137,80 +139,107 @@ def place_call_via_calle(
     result_schema:   dict,
     task_token:      str,
     idempotency_key: str,
+    agent_run_id:    str = "",
+    timezone:        str = "UTC",
+    contact_country: str = "",
+    contact_first_name: str = "",
 ) -> dict:
     """
-    Place an outbound voice call via the CALL-E API.
+    Place an outbound voice call via the VoiceProvider (CALL-E).
 
     THIS CALL IS ASYNC. The agent returns immediately after calling this tool.
     Do NOT wait for a call result — it will arrive via webhook.
 
-    The task_token (from Step Functions .waitForTaskToken) is stored in DynamoDB
-    so the webhook-handler Lambda can resume the SFN execution when CALL-E
-    sends the CallCompleted webhook.
+    The first spoken sentence is an EU AI Act Article 50 disclosure plus a
+    TCPA recording-consent prompt. Missing CALL-E credentials in production
+    refuse the call.
 
-    Args:
-        tenant_id:       Tenant identifier for isolation
-        contact_id:      Contact being called
-        to_phone:        E.164 format phone number
-        call_goal:       'qualification' | 'meeting_confirmation' | 'follow_up'
-        result_schema:   JSON schema describing what CALL-E should extract
-        task_token:      Step Functions task token from the event
-        idempotency_key: Unique key for deduplication
-
-    Returns { callId: str, status: 'initiated' }
+    Returns { callId: str, status: 'initiated' } or a blocked payload.
     """
-    calle_base_url = os.environ.get("CALLE_BASE_URL", "")
-    calle_api_key  = os.environ.get("CALLE_API_KEY", "")
-    table          = os.environ.get("DYNAMODB_TABLE", "")
+    crm_read_arn = os.environ.get("CRM_READ_SERVICE_ARN", "")
+    if crm_read_arn:
+        tenant = _invoke_lambda(crm_read_arn, {
+            "operation": "get_tenant",
+            "payload": {},
+            "tenantId": tenant_id,
+        })
+        row = tenant.get("result") or {}
+        if str(row.get("tier") or "free") == "free":
+            return {
+                "callInitiated": False,
+                "blocked": True,
+                "paywall": True,
+                "reason": "Voice is not included on the Free plan. Upgrade to Starter to place calls.",
+            }
 
-    # Store taskToken in DynamoDB BEFORE placing the call (idempotency)
+    table = os.environ.get("DYNAMODB_TABLE", "")
+    window = validate_calling_window(timezone, contact_country)
+    dnc = check_dnc(to_phone, contact_country)
+    if not window.get("allowed"):
+        return {"callInitiated": False, "blocked": True, "reason": window.get("reason"), "callingWindow": window, "dnc": dnc}
+    if not dnc.get("allowed"):
+        return {"callInitiated": False, "blocked": True, "reason": dnc.get("reason"), "callingWindow": window, "dnc": dnc}
+
+    provider = get_provider()
+    plan = provider.plan(
+        call_goal=call_goal,
+        contact={"first_name": contact_first_name},
+        disclosure_text=AI_DISCLOSURE,
+    )
+    schema = result_schema or plan["resultSchema"]
+    disclosure_at = datetime.now(dt_timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    placed = provider.run(
+        to_phone=to_phone,
+        call_goal=call_goal,
+        result_schema=schema,
+        webhook_url=os.environ.get("CALLE_WEBHOOK_URL", ""),
+        metadata={
+            "tenantId": tenant_id,
+            "contactId": contact_id,
+            "agentRunId": agent_run_id,
+            "idempotencyKey": idempotency_key,
+            "aiDisclosureText": AI_DISCLOSURE,
+        },
+        opening=plan["opening"],
+        idempotency_key=idempotency_key,
+    )
+
     if table and task_token:
-        _ddb.put_item(
-            TableName=table,
-            Item={
-                "pk":             {"S": f"{tenant_id}#call_tasks#{idempotency_key}"},
-                "sk":             {"S": "task_token"},
-                "taskToken":      {"S": task_token},
-                "tenantId":       {"S": tenant_id},
-                "contactId":      {"S": contact_id},
-                "idempotencyKey": {"S": idempotency_key},
-                "createdAt":      {"S": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
-                "ttl":            {"N": str(int(time.time()) + 86400 * 3)},  # 3-day TTL
-            },
-            ConditionExpression="attribute_not_exists(pk)",  # idempotency guard
-        )
+        try:
+            store_call_task(
+                table=table,
+                tenant_id=tenant_id,
+                contact_id=contact_id,
+                agent_run_id=agent_run_id,
+                task_token=task_token,
+                idempotency_key=idempotency_key,
+                call_id=placed.get("callId", ""),
+                disclosure_text=AI_DISCLOSURE,
+                disclosure_at=disclosure_at,
+                calling_window=window,
+                dnc_result=dnc,
+            )
+        except Exception as exc:
+            # ConditionalCheckFailed means this idempotency key already fired.
+            if "ConditionalCheckFailed" not in str(exc):
+                raise
 
-    if not calle_base_url or not calle_api_key:
-        # Stub for local development / testing
-        print(f"CALL-E stub: would call {to_phone} for {call_goal}. idempotencyKey={idempotency_key}")
-        return {"callId": f"stub-{idempotency_key}", "status": "initiated", "source": "stub"}
+    return {
+        "callId": placed.get("callId", ""),
+        "status": placed.get("status", "initiated"),
+        "source": placed.get("source"),
+        "aiDisclosureDeliveredAt": disclosure_at,
+        "aiDisclosureText": AI_DISCLOSURE,
+        "callingWindow": window,
+        "dnc": dnc,
+    }
 
-    try:
-        resp = httpx.post(
-            f"{calle_base_url}/calls",
-            headers={
-                "Authorization": f"Bearer {calle_api_key}",
-                "Content-Type":  "application/json",
-                "Idempotency-Key": idempotency_key,
-            },
-            json={
-                "to":             to_phone,
-                "goal":           call_goal,
-                "result_schema":  result_schema,
-                "webhook_url":    os.environ.get("CALLE_WEBHOOK_URL", ""),
-                "metadata": {
-                    "tenantId":      tenant_id,
-                    "contactId":     contact_id,
-                    "idempotencyKey": idempotency_key,
-                },
-            },
-            timeout=15.0,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return {"callId": data.get("id", ""), "status": data.get("status", "initiated")}
-    except Exception as exc:
-        raise RuntimeError(f"CALL-E API error: {exc}") from exc
+
+@tool
+def cancel_in_flight_call(call_id: str) -> dict:
+    """Best-effort cancel of an in-flight CALL-E call. May return cancelled=false."""
+    return get_provider().cancel(call_id=call_id)
 
 
 @tool
@@ -246,6 +275,7 @@ def write_call_result(
             "durationSeconds":  duration_seconds,
             "transcriptS3Key":  transcript_s3_key,
             "summaryJson":      summary_json,
+            "aiDisclosureText": AI_DISCLOSURE,
         },
         "tenantId":  tenant_id,
         "actorType": "agent",

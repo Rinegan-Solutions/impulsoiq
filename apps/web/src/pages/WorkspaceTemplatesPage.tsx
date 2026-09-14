@@ -13,7 +13,8 @@
  *
  * 5B (Accounts Receivable) requires legal review before activation.
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
   Users, DollarSign, Truck, Calendar, HeartHandshake,
@@ -21,8 +22,11 @@ import {
 } from 'lucide-react';
 import { AppShell } from '@/components/app/AppShell';
 import { SEO } from '@/components/SEO';
-import { templatesApi } from '@/api/client';
+import { contactsApi, templatesApi, tenantApi } from '@/api/client';
 import { cn } from '@/lib/utils';
+import { useAuth, roleOf } from '@/lib/auth/useAuth';
+import { useTenant, invalidateTenantCache } from '@/lib/useTenant';
+import { isPayingCsDesignPartner } from '@/lib/expansion';
 
 // ── Template catalogue (mirrors coordinator/templates.py) ─────────────────────
 
@@ -107,9 +111,23 @@ const BADGE_CONFIG = {
 const ease = [0.22, 1, 0.36, 1] as const;
 
 export default function WorkspaceTemplatesPage() {
+  const navigate = useNavigate();
+  const { user } = useAuth();
+  const tenant = useTenant(user?.tenantId);
+  const role = user ? roleOf(user) : null;
+  const canFlag = role === 'admin' || role === 'manager';
+  const partner = isPayingCsDesignPartner(tenant);
   const [activeKeys, setActiveKeys] = useState<Set<string>>(new Set());
   const [loading, setLoading]       = useState<string | null>(null);
   const [expanded, setExpanded]     = useState<string | null>(null);
+  const [launchError, setLaunchError] = useState<string | null>(null);
+  const [flagBusy, setFlagBusy] = useState(false);
+
+  useEffect(() => {
+    void templatesApi.list().then((rows) => {
+      setActiveKeys(new Set(rows.filter((r) => r.status === 'active').map((r) => r.templateKey)));
+    }).catch(() => { /* keep empty until the API answers */ });
+  }, []);
 
   async function toggleTemplate(key: string, isActive: boolean) {
     setLoading(key);
@@ -125,6 +143,43 @@ export default function WorkspaceTemplatesPage() {
     finally { setLoading(null); }
   }
 
+  async function setDesignPartner(next: boolean) {
+    if (!user?.tenantId) return;
+    setFlagBusy(true);
+    setLaunchError(null);
+    try {
+      await tenantApi.setCsDesignPartner(next);
+      invalidateTenantCache(user.tenantId);
+    } catch (err) {
+      setLaunchError(err instanceof Error ? err.message : 'Could not update the design-partner flag');
+    } finally {
+      setFlagBusy(false);
+    }
+  }
+
+  async function launchTemplate(key: string) {
+    setLaunchError(null);
+    setLoading(key);
+    try {
+      const page = await contactsApi.list(1, 25);
+      const targetIds = page.items.map((c) => c.id);
+      if (targetIds.length === 0) {
+        setLaunchError('No contacts to launch against. Import contacts first — this will not invent rows.');
+        return;
+      }
+      if (!window.confirm(`Launch ${key} for ${targetIds.length} contact${targetIds.length === 1 ? '' : 's'} from the current list?`)) {
+        return;
+      }
+      const result = await templatesApi.launch(key, { targetIds });
+      navigate(`/control-panel`);
+      void result;
+    } catch (err) {
+      setLaunchError(err instanceof Error ? err.message : 'Launch failed');
+    } finally {
+      setLoading(null);
+    }
+  }
+
   return (
     <AppShell>
       <SEO title="Workspace Templates — ImpulsoIQ" description="Activate workspace templates to extend agents beyond sales" />
@@ -133,13 +188,13 @@ export default function WorkspaceTemplatesPage() {
         {/* Header */}
         <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45, ease }} className="mb-7">
           <div className="text-[0.72rem] font-bold uppercase tracking-[0.12em] text-indigo-600 dark:text-indigo-400 mb-2">
-            Phase 5 · Workspace Expansion
+            Phase 6 · Workspace Expansion
           </div>
           <h1 className="text-[1.35rem] font-extrabold tracking-tight text-slate-900 dark:text-white mb-1">
             Workspace Templates
           </h1>
           <p className="text-[0.84rem] text-slate-500 dark:text-slate-400 max-w-[560px]">
-            The same 10 agents, reconfigured with new goals, tone profiles, compliance rules, and approval gates — serving departments beyond sales.
+            Same ten agents, different goals and gates. Launch from this page. Home shows CS, recruiting, vendor, and appointment starters only after this workspace is marked a paying CS design partner. Accounts receivable stays here — never on Home.
           </p>
           <div className="flex items-center gap-2 mt-3">
             <span className="flex items-center gap-1.5 text-[0.75rem] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-500/20">
@@ -148,6 +203,32 @@ export default function WorkspaceTemplatesPage() {
             <span className="text-[0.75rem] text-slate-400 dark:text-slate-600">Same infrastructure, new configuration</span>
           </div>
         </motion.div>
+
+        {launchError && (
+          <p className="mb-4 text-[0.82rem] text-amber-700 dark:text-amber-300">{launchError}</p>
+        )}
+
+        <div className="mb-6 rounded-2xl border border-slate-200 dark:border-white/[0.065] bg-white dark:bg-[#0d1526] p-5">
+          <p className="text-[0.88rem] font-bold text-slate-900 dark:text-white">Paying CS design partner</p>
+          <p className="mt-1 text-[0.8rem] text-slate-500 dark:text-slate-400 max-w-[640px]">
+            Home unlocks customer-success, recruiting, vendor, and appointment starters only when this flag is on and the workspace is on Starter, Growth, or Enterprise. Free workspaces stay sales-only. This is an operator attestation, not a Stripe webhook.
+          </p>
+          <p className="mt-2 text-[0.78rem] text-slate-500 dark:text-slate-400">
+            Current plan: {tenant?.tier ?? '…'} · Home expansion: {partner ? 'on' : 'off'}
+          </p>
+          {canFlag && (
+            <button
+              type="button"
+              disabled={flagBusy || !tenant}
+              onClick={() => void setDesignPartner(!((tenant?.config?.expansion as { csDesignPartner?: boolean } | undefined)?.csDesignPartner === true))}
+              className="mt-3 px-3 py-2 rounded-xl text-[0.8rem] font-semibold border border-indigo-200 dark:border-indigo-500/30 text-indigo-700 dark:text-indigo-300 disabled:opacity-40"
+            >
+              {flagBusy ? 'Saving…' : ((tenant?.config?.expansion as { csDesignPartner?: boolean } | undefined)?.csDesignPartner === true)
+                ? 'Clear design-partner flag'
+                : 'Mark as paying CS design partner'}
+            </button>
+          )}
+        </div>
 
         {/* Template grid */}
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
@@ -253,6 +334,15 @@ export default function WorkspaceTemplatesPage() {
                   >
                     {isLoading ? '…' : isActive ? 'Deactivate' : 'Activate'}
                   </button>
+                  {isActive && (
+                    <button
+                      onClick={() => void launchTemplate(t.key)}
+                      disabled={isLoading}
+                      className="px-3 py-2.5 rounded-xl text-[0.84rem] font-semibold text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-500/30 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 disabled:opacity-40"
+                    >
+                      Launch
+                    </button>
+                  )}
                   <button
                     onClick={() => setExpanded(isExpanded ? null : t.key)}
                     className="w-9 h-9 flex items-center justify-center rounded-xl border border-slate-200 dark:border-white/[0.1] text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:border-slate-300 dark:hover:border-white/20 transition-all"
@@ -268,8 +358,7 @@ export default function WorkspaceTemplatesPage() {
 
         {/* Bottom note */}
         <p className="mt-6 text-center text-[0.78rem] text-slate-400 dark:text-slate-600">
-          Phase 5 proof point: the same 10 agents carry ImpulsoIQ from a sales tool into a workspace-wide platform.
-          Activating a template takes under 5 minutes.
+          Accounts receivable still requires legal review in the database before launch. Contact center is not in this phase.
         </p>
 
       </div>

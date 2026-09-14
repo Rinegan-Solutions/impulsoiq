@@ -8,7 +8,11 @@
  * Supports both API Gateway and direct Lambda invocation from agents.
  */
 import type { APIGatewayProxyEvent, Handler } from 'aws-lambda';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient, QueryCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { getDb } from './db';
+
+const metering = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 type Operation =
   | 'get_contact'
@@ -41,10 +45,32 @@ type Operation =
   // call for its table views. These are paginated deliberately: a tenant's
   // contact list is unbounded and the browser must not pull all of it.
   | 'list_contacts'
+  | 'list_accounts'
+  | 'list_activities'
+  | 'list_pending_approvals'
+  | 'get_activity'
   | 'list_agent_runs'
+  | 'get_agent_run'
+  | 'list_active_agent_runs'
+  | 'get_metering_usage'
+  | 'get_hitl_status'
   | 'list_deals'
   | 'list_campaigns'
   | 'get_dashboard_stats'
+  | 'get_campaign'
+  | 'list_enrichment_records'
+  | 'list_decayed_enrichment'
+  | 'list_sequences'
+  | 'get_sequence'
+  | 'get_email_verification'
+  | 'get_outbound_quality'
+  | 'get_campaign_usage'
+  | 'export_dsar'
+  | 'export_audit'
+  | 'get_channel_efficacy'
+  | 'get_pipeline_attribution'
+  | 'get_forecast_report'
+  | 'get_personal_queue'
   | 'get_support_signals_for_contact'; // Phase 9D: support signals for renewal risk
 
 interface ReadRequest {
@@ -72,6 +98,43 @@ function tenantFromEvent(event: APIGatewayProxyEvent): string | null {
     | Record<string, string>
     | undefined;
   return claims?.['custom:tenant_id'] ?? null;
+}
+
+
+// ── Workspace membership ─────────────────────────────────────────────────────
+// custom:tenant_id records the workspace an account ASKED for at sign-up — the
+// browser chose it. Membership is granted only by tenant-provisioner, which adds
+// the account to a Cognito group after checking it may join (it created the
+// workspace, or its verified email domain matches). An account whose
+// provisioning failed or was refused has the claim but no group, and must reach
+// no data at all.
+const WORKSPACE_ROLES = new Set(['admin', 'manager', 'member']);
+
+function hasWorkspaceRole(event: APIGatewayProxyEvent): boolean {
+  const claims = event.requestContext?.authorizer?.claims as Record<string, unknown> | undefined;
+  const raw = claims?.['cognito:groups'];
+  if (raw == null) return false;
+  // The REST Cognito authorizer flattens claims to strings, so a groups array
+  // can arrive bracketed and space- or comma-separated. Tokenise rather than
+  // JSON.parse, and accept a real array too.
+  const values = Array.isArray(raw) ? raw.map(String) : String(raw).split(/[\s,[\]"]+/);
+  return values.some((g) => WORKSPACE_ROLES.has(g));
+}
+
+/**
+ * Data-subject and audit reads are administrative actions.
+ *
+ * crm-write already restricts erase_dsar to admins and managers; the matching
+ * READ paths (export_dsar, export_audit) had no role check, so any member could
+ * pull a contact's full consent/call history or the whole workspace audit log.
+ * Enterprise settings tells customers these are admin tools — this makes that true.
+ */
+function isManagerOrAdmin(event: APIGatewayProxyEvent): boolean {
+  const claims = event.requestContext?.authorizer?.claims as Record<string, unknown> | undefined;
+  const raw = claims?.['cognito:groups'];
+  if (raw == null) return false;
+  const values = Array.isArray(raw) ? raw.map(String) : String(raw).split(/[\s,[\]"]+/);
+  return values.some((g) => g === 'admin' || g === 'manager');
 }
 
 // ── Layer 2 of tenant isolation ──────────────────────────────────────────────
@@ -122,7 +185,10 @@ function assertTenantMatchesHost(event: APIGatewayProxyEvent, tenantId: string):
 
 async function getContact(db: Awaited<ReturnType<typeof getDb>>, tenantId: string, p: Record<string, unknown>): Promise<ReadResponse> {
   const res = await db.query(
-    `SELECT * FROM contact WHERE id = $1 AND tenant_id = $2`,
+    `SELECT c.*, acc.name AS account_name
+     FROM contact c
+     LEFT JOIN account acc ON acc.id = c.account_id AND acc.tenant_id = c.tenant_id
+     WHERE c.id = $1 AND c.tenant_id = $2`,
     [p.id, tenantId],
   );
   if (res.rowCount === 0) return { ok: true, result: null };
@@ -165,12 +231,46 @@ async function getActivityHistory(db: Awaited<ReturnType<typeof getDb>>, tenantI
 }
 
 async function getEnrichmentData(db: Awaited<ReturnType<typeof getDb>>, tenantId: string, p: Record<string, unknown>): Promise<ReadResponse> {
-  const res = await db.query(
+  const blob = await db.query(
     `SELECT enrichment_json FROM contact WHERE id = $1 AND tenant_id = $2`,
     [p.contactId, tenantId],
   );
-  if (res.rowCount === 0) return { ok: true, result: null };
-  return { ok: true, result: res.rows[0].enrichment_json };
+  const records = await db.query(
+    `SELECT source, field, value, confidence, fetched_at, decay_policy, metadata
+     FROM enrichment_record
+     WHERE tenant_id = $1 AND contact_id = $2
+     ORDER BY fetched_at DESC
+     LIMIT 80`,
+    [tenantId, p.contactId],
+  );
+  const latestEmail = records.rows.find((r) => r.field === 'email' || r.field === 'email_verified');
+  return {
+    ok: true,
+    result: {
+      enrichment_json: blob.rows[0]?.enrichment_json ?? {},
+      records: records.rows,
+      verifiedEmail: isVerifiedEmailRow(latestEmail),
+    },
+  };
+}
+
+function isVerifiedEmailRow(row: { field?: string; confidence?: number | string; metadata?: Record<string, unknown>; fetched_at?: string; decay_policy?: string } | undefined): boolean {
+  if (!row) return false;
+  const conf = Number(row.confidence ?? 0);
+  if (conf < 0.8) return false;
+  const meta = row.metadata ?? {};
+  const status = String(meta.status ?? meta.verificationStatus ?? '');
+  if (status && !['verified', 'valid', 'deliverable'].includes(status)) return false;
+  if (row.field === 'email' && status === '') return false;
+  return !isDecayed(row.fetched_at, row.decay_policy ?? '30d');
+}
+
+function isDecayed(fetchedAt: string | undefined, policy: string): boolean {
+  if (!fetchedAt) return true;
+  const days = policy.endsWith('d') ? Number(policy.slice(0, -1)) : 90;
+  if (!Number.isFinite(days) || days <= 0) return false;
+  const ageMs = Date.now() - new Date(fetchedAt).getTime();
+  return ageMs > days * 86400_000;
 }
 
 async function getBrandVoiceProfile(db: Awaited<ReturnType<typeof getDb>>, tenantId: string, _p: Record<string, unknown>): Promise<ReadResponse> {
@@ -205,10 +305,16 @@ const dispatch: Handler<
     const apigwEvent = event as APIGatewayProxyEvent;
     tenantId = tenantFromEvent(apigwEvent);
     if (!tenantId) return { statusCode: 401, body: JSON.stringify({ error: 'Missing tenant_id' }) };
+    if (!hasWorkspaceRole(apigwEvent)) {
+      return { statusCode: 403, body: JSON.stringify({ error: 'This account has not been granted access to its workspace' }) };
+    }
 
     const mismatch = assertTenantMatchesHost(apigwEvent, tenantId);
     if (mismatch) return { statusCode: 403, body: JSON.stringify({ error: mismatch }) };
     req = JSON.parse(apigwEvent.body ?? '{}') as ReadRequest;
+    const claims = apigwEvent.requestContext?.authorizer?.claims as Record<string, string> | undefined;
+    const actorId = claims?.sub ?? claims?.email ?? '';
+    req.payload = { ...(req.payload ?? {}), _actorId: actorId };
   } else {
     // Direct agent invocation path
     const directEvent = event as { operation: Operation; payload: Record<string, unknown>; tenantId: string };
@@ -250,7 +356,7 @@ const dispatch: Handler<
       case 'get_tenant': {
         // Returns full tenant record including tier — used by metering quota check
         const r = await db.query(
-          `SELECT id, name, subdomain, tier, config FROM tenant WHERE id = $1`,
+          `SELECT id, name, subdomain, email_domain, tier, config FROM tenant WHERE id = $1`,
           [tenantId],
         );
         return { result: r.rows[0] ?? null };
@@ -281,14 +387,14 @@ const dispatch: Handler<
         // Returns days-in-current-stage per deal for anomaly detection
         // "Acme Corp deal has gone quiet 9 days against this team's 5-day median"
         const r = await db.query(
-          `SELECT d.id, d.name, d.stage, d.amount,
+          `SELECT d.id, d.name, d.stage, d.amount, d.contact_id,
                   EXTRACT(EPOCH FROM (NOW() - d.updated_at)) / 86400 AS days_in_stage,
                   EXTRACT(EPOCH FROM (NOW() - MAX(a.occurred_at))) / 86400 AS days_since_activity
            FROM   deal d
            LEFT   JOIN activity a ON a.deal_id = d.id AND a.tenant_id = $1
            WHERE  d.tenant_id = $1
              AND  d.stage NOT IN ('Closed Won', 'Prospecting')
-           GROUP  BY d.id
+           GROUP  BY d.id, d.name, d.stage, d.amount, d.contact_id
            ORDER  BY days_since_activity DESC NULLS LAST`,
           [tenantId],
         );
@@ -513,13 +619,17 @@ const dispatch: Handler<
         const page = Math.max(1, Number(payload.page ?? 1));
         const pageSize = Math.min(100, Math.max(1, Number(payload.pageSize ?? 20)));
         const search = String(payload.search ?? '').trim();
+        const stage = String(payload.stage ?? '').trim();
 
-        // Search terms go in as a PARAMETER, never interpolated into the SQL.
         const params: unknown[] = [tenantId];
         let where = 'WHERE c.tenant_id = $1';
         if (search) {
           params.push(`%${search}%`);
-          where += ` AND (c.first_name ILIKE $2 OR c.last_name ILIKE $2 OR c.email ILIKE $2)`;
+          where += ` AND (c.first_name ILIKE $${params.length} OR c.last_name ILIKE $${params.length} OR c.email ILIKE $${params.length})`;
+        }
+        if (stage) {
+          params.push(stage);
+          where += ` AND c.stage = $${params.length}`;
         }
 
         const countRes = await db.query(
@@ -545,6 +655,103 @@ const dispatch: Handler<
         );
 
         return { result: { items: rows.rows, total: countRes.rows[0]?.total ?? 0, page, pageSize } };
+      }
+
+      case 'list_accounts': {
+        const page = Math.max(1, Number(payload.page ?? 1));
+        const pageSize = Math.min(100, Math.max(1, Number(payload.pageSize ?? 20)));
+        const search = String(payload.search ?? '').trim();
+        const params: unknown[] = [tenantId];
+        let where = 'WHERE a.tenant_id = $1';
+        if (search) {
+          params.push(`%${search}%`);
+          where += ` AND (a.name ILIKE $${params.length} OR a.domain ILIKE $${params.length} OR COALESCE(a.industry,'') ILIKE $${params.length})`;
+        }
+        const countRes = await db.query(
+          `SELECT COUNT(*)::int AS total FROM account a ${where}`,
+          params,
+        );
+        const rows = await db.query(
+          `SELECT a.*,
+                  (SELECT COUNT(*)::int FROM contact c WHERE c.account_id = a.id AND c.tenant_id = a.tenant_id) AS contact_count,
+                  (SELECT COUNT(*)::int FROM deal d WHERE d.account_id = a.id AND d.tenant_id = a.tenant_id) AS deal_count,
+                  (SELECT COALESCE(SUM(d.amount), 0) FROM deal d
+                     WHERE d.account_id = a.id AND d.tenant_id = a.tenant_id
+                       AND d.stage <> 'Closed Won') AS pipeline,
+                  (SELECT MAX(act.occurred_at) FROM activity act
+                     WHERE act.tenant_id = a.tenant_id
+                       AND (act.account_id = a.id OR act.contact_id IN (
+                         SELECT c.id FROM contact c WHERE c.account_id = a.id AND c.tenant_id = a.tenant_id
+                       ))) AS last_activity_at
+           FROM account a
+           ${where}
+           ORDER BY a.updated_at DESC
+           LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+          [...params, pageSize, (page - 1) * pageSize],
+        );
+        return { result: { items: rows.rows, total: countRes.rows[0]?.total ?? 0, page, pageSize } };
+      }
+
+      case 'list_activities': {
+        const page = Math.max(1, Number(payload.page ?? 1));
+        const pageSize = Math.min(100, Math.max(1, Number(payload.pageSize ?? 40)));
+        const contactId = String(payload.contactId ?? '').trim();
+        const accountId = String(payload.accountId ?? '').trim();
+        const params: unknown[] = [tenantId];
+        let where = 'WHERE a.tenant_id = $1';
+        if (contactId) {
+          params.push(contactId);
+          where += ` AND a.contact_id = $${params.length}`;
+        }
+        if (accountId) {
+          params.push(accountId);
+          where += ` AND (a.account_id = $${params.length} OR a.contact_id IN (SELECT id FROM contact WHERE account_id = $${params.length} AND tenant_id = $1))`;
+        }
+        const countRes = await db.query(
+          `SELECT COUNT(*)::int AS total FROM activity a ${where}`,
+          params,
+        );
+        const rows = await db.query(
+          `SELECT a.*, c.first_name, c.last_name, c.email,
+                  acc.name AS account_name
+           FROM activity a
+           LEFT JOIN contact c ON c.id = a.contact_id AND c.tenant_id = a.tenant_id
+           LEFT JOIN account acc ON acc.id = COALESCE(a.account_id, c.account_id) AND acc.tenant_id = a.tenant_id
+           ${where}
+           ORDER BY a.occurred_at DESC
+           LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+          [...params, pageSize, (page - 1) * pageSize],
+        );
+        return { result: { items: rows.rows, total: countRes.rows[0]?.total ?? 0, page, pageSize } };
+      }
+
+      case 'list_pending_approvals': {
+        const rows = await db.query(
+          `SELECT a.*, c.first_name, c.last_name, c.email, c.account_id,
+                  acc.name AS account_name
+           FROM activity a
+           LEFT JOIN contact c ON c.id = a.contact_id AND c.tenant_id = a.tenant_id
+           LEFT JOIN account acc ON acc.id = COALESCE(a.account_id, c.account_id) AND acc.tenant_id = a.tenant_id
+           WHERE a.tenant_id = $1
+             AND a.metadata->>'status' = 'awaiting_approval'
+           ORDER BY a.occurred_at DESC
+           LIMIT 100`,
+          [tenantId],
+        );
+        return { result: rows.rows };
+      }
+
+      case 'get_activity': {
+        const rows = await db.query(
+          `SELECT a.*, c.first_name, c.last_name, c.email, acc.name AS account_name
+           FROM activity a
+           LEFT JOIN contact c ON c.id = a.contact_id AND c.tenant_id = a.tenant_id
+           LEFT JOIN account acc ON acc.id = COALESCE(a.account_id, c.account_id) AND acc.tenant_id = a.tenant_id
+           WHERE a.tenant_id = $1 AND a.id = $2
+           LIMIT 1`,
+          [tenantId, payload.id],
+        );
+        return { result: rows.rows[0] ?? null };
       }
 
       case 'list_campaigns': {
@@ -606,6 +813,91 @@ const dispatch: Handler<
         };
       }
 
+      case 'get_agent_run': {
+        const rows = await db.query(
+          `SELECT ar.*, c.first_name, c.last_name
+           FROM   agent_run ar
+           LEFT JOIN contact c ON c.id = ar.contact_id AND c.tenant_id = ar.tenant_id
+           WHERE  ar.tenant_id = $1 AND ar.id = $2
+           LIMIT 1`,
+          [tenantId, payload.id],
+        );
+        return { result: rows.rows[0] ?? null };
+      }
+
+      case 'list_active_agent_runs': {
+        const rows = await db.query(
+          `SELECT ar.*, c.first_name, c.last_name
+           FROM   agent_run ar
+           LEFT JOIN contact c ON c.id = ar.contact_id AND c.tenant_id = ar.tenant_id
+           WHERE  ar.tenant_id = $1
+             AND  ar.status IN ('running','paused','pending')
+           ORDER BY ar.started_at DESC`,
+          [tenantId],
+        );
+        return { result: rows.rows };
+      }
+
+      case 'get_metering_usage': {
+        const table = process.env.METERING_TABLE;
+        if (!table) {
+          return { result: { period: null, items: [], error: 'METERING_TABLE is not configured' } };
+        }
+        const period = typeof payload.period === 'string' && payload.period
+          ? payload.period
+          : new Date().toISOString().slice(0, 7);
+        const res = await metering.send(new QueryCommand({
+          TableName: table,
+          KeyConditionExpression: 'pk = :pk',
+          ExpressionAttributeValues: { ':pk': `${tenantId}#meter#${period}` },
+        }));
+        return {
+          result: {
+            period,
+            items: (res.Items ?? []).map((item) => ({
+              resource: item.sk,
+              used: Number(item.count ?? 0),
+              quota: Number(item.quota ?? 0),
+            })),
+          },
+        };
+      }
+
+      case 'get_hitl_status': {
+        const tenant = await db.query(
+          `SELECT tier, config FROM tenant WHERE id = $1`,
+          [tenantId],
+        );
+        const config = (tenant.rows[0]?.config ?? {}) as Record<string, unknown>;
+        const tier = String(tenant.rows[0]?.tier ?? 'free');
+        const counts = await db.query(
+          `SELECT
+             COUNT(*) FILTER (WHERE type = 'email' AND actor_type = 'agent'
+               AND COALESCE(metadata->>'status','') <> 'awaiting_approval')::int AS email_sends,
+             COUNT(*) FILTER (WHERE type = 'call' AND actor_type = 'agent')::int AS calls
+           FROM activity WHERE tenant_id = $1`,
+          [tenantId],
+        );
+        const emailSends = counts.rows[0]?.email_sends ?? 0;
+        const calls = counts.rows[0]?.calls ?? 0;
+        const loosened = config.hitlRelaxed === true;
+        const requiresApproval = tier === 'free'
+          ? true
+          : (loosened ? false : (emailSends < 20 || calls < 5));
+        return {
+          result: {
+            emailSends,
+            calls,
+            firstNSends: 20,
+            firstNCalls: 5,
+            hitlRelaxed: loosened,
+            requiresApproval,
+            voiceAllowed: tier !== 'free',
+            tier,
+          },
+        };
+      }
+
       case 'list_agent_runs': {
         const page = Math.max(1, Number(payload.page ?? 1));
         const pageSize = Math.min(100, Math.max(1, Number(payload.pageSize ?? 20)));
@@ -633,6 +925,128 @@ const dispatch: Handler<
         };
       }
 
+      case 'get_campaign': {
+        const r = await db.query(`SELECT * FROM campaign WHERE id = $1 AND tenant_id = $2`, [payload.id, tenantId]);
+        return { result: r.rows[0] ?? null };
+      }
+
+      case 'list_enrichment_records': {
+        const r = await db.query(
+          `SELECT * FROM enrichment_record
+           WHERE tenant_id = $1 AND contact_id = $2
+           ORDER BY fetched_at DESC
+           LIMIT 100`,
+          [tenantId, payload.contactId],
+        );
+        return { result: r.rows };
+      }
+
+      case 'list_decayed_enrichment': {
+        const r = await db.query(
+          `SELECT er.*, c.first_name, c.last_name, c.email
+           FROM enrichment_record er
+           JOIN contact c ON c.id = er.contact_id AND c.tenant_id = er.tenant_id
+           WHERE er.tenant_id = $1
+             AND er.fetched_at < NOW() - INTERVAL '90 days'
+           ORDER BY er.fetched_at ASC
+           LIMIT 200`,
+          [tenantId],
+        );
+        return { result: r.rows };
+      }
+
+      case 'list_sequences': {
+        const r = await db.query(
+          `SELECT * FROM sequence WHERE tenant_id = $1 ORDER BY updated_at DESC`,
+          [tenantId],
+        );
+        return { result: r.rows };
+      }
+
+      case 'get_sequence': {
+        const r = await db.query(
+          `SELECT * FROM sequence WHERE id = $1 AND tenant_id = $2`,
+          [payload.id, tenantId],
+        );
+        return { result: r.rows[0] ?? null };
+      }
+
+      case 'get_email_verification': {
+        const r = await db.query(
+          `SELECT source, field, value, confidence, fetched_at, decay_policy, metadata
+           FROM enrichment_record
+           WHERE tenant_id = $1 AND contact_id = $2
+             AND field IN ('email','email_verified')
+           ORDER BY fetched_at DESC
+           LIMIT 5`,
+          [tenantId, payload.contactId],
+        );
+        const latest = r.rows[0] as { field?: string; confidence?: number; metadata?: Record<string, unknown>; fetched_at?: string; decay_policy?: string } | undefined;
+        return {
+          result: {
+            verified: isVerifiedEmailRow(latest),
+            records: r.rows,
+          },
+        };
+      }
+
+      case 'get_outbound_quality': {
+        const consent = await db.query(
+          `SELECT COUNT(*)::int AS n FROM activity
+           WHERE tenant_id = $1 AND metadata->>'kind' = 'consent_block'`,
+          [tenantId],
+        );
+        const bounce = await db.query(
+          `SELECT COUNT(*)::int AS n FROM activity
+           WHERE tenant_id = $1 AND metadata->>'kind' = 'bounce'`,
+          [tenantId],
+        );
+        const calls = await db.query(
+          `SELECT
+             COUNT(*)::int AS total,
+             COUNT(*) FILTER (WHERE outcome = 'answered')::int AS answered,
+             COUNT(*) FILTER (WHERE schema_valid IS TRUE)::int AS schema_ok,
+             COUNT(*) FILTER (WHERE schema_valid IS FALSE)::int AS schema_fail
+           FROM call_result WHERE tenant_id = $1`,
+          [tenantId],
+        );
+        const total = calls.rows[0]?.total ?? 0;
+        const answered = calls.rows[0]?.answered ?? 0;
+        const schemaOk = calls.rows[0]?.schema_ok ?? 0;
+        return {
+          result: {
+            consentBlocks: consent.rows[0]?.n ?? 0,
+            bounces: bounce.rows[0]?.n ?? 0,
+            calls: total,
+            answered,
+            connectRate: total > 0 ? answered / total : null,
+            schemaValidationPassRate: total > 0 ? schemaOk / total : null,
+            schemaFailures: calls.rows[0]?.schema_fail ?? 0,
+          },
+        };
+      }
+
+      case 'get_campaign_usage': {
+        const r = await db.query(
+          `SELECT c.id, c.name,
+                  COUNT(DISTINCT ar.id)::int AS runs,
+                  COUNT(DISTINCT CASE WHEN a.type = 'email' THEN a.id END)::int AS emails,
+                  COUNT(DISTINCT CASE WHEN a.metadata->>'kind' = 'consent_block' THEN a.id END)::int AS consent_blocks,
+                  COUNT(DISTINCT CASE WHEN a.metadata->>'kind' = 'bounce' THEN a.id END)::int AS bounces,
+                  COUNT(DISTINCT cr.id)::int AS calls,
+                  COALESCE(SUM(cr.duration_seconds), 0)::int AS call_seconds
+           FROM campaign c
+           LEFT JOIN agent_run ar ON ar.campaign_id = c.id AND ar.tenant_id = c.tenant_id
+           LEFT JOIN activity a ON a.agent_run_id = ar.id AND a.tenant_id = c.tenant_id
+           LEFT JOIN call_result cr ON cr.agent_run_id = ar.id AND cr.tenant_id = c.tenant_id
+           WHERE c.tenant_id = $1
+           GROUP BY c.id
+           ORDER BY c.created_at DESC`,
+          [tenantId],
+        );
+        return { result: r.rows };
+      }
+
       case 'get_dashboard_stats': {
         // One statement, not five. Each sub-select is tenant-scoped; a missing
         // tenant_id predicate anywhere here would leak across tenants.
@@ -649,6 +1063,207 @@ const dispatch: Handler<
           [tenantId],
         );
         return { result: r.rows[0] ?? {} };
+      }
+
+      case 'get_channel_efficacy': {
+        const activity = await db.query(
+          `SELECT type,
+                  COUNT(*)::int AS total,
+                  COUNT(*) FILTER (WHERE actor_type = 'agent')::int AS agent,
+                  COUNT(*) FILTER (WHERE actor_type = 'human')::int AS human
+           FROM activity
+           WHERE tenant_id = $1 AND type IN ('email','sms','call')
+           GROUP BY type`,
+          [tenantId],
+        );
+        const calls = await db.query(
+          `SELECT outcome, COUNT(*)::int AS n
+           FROM call_result WHERE tenant_id = $1
+           GROUP BY outcome`,
+          [tenantId],
+        );
+        return {
+          result: {
+            channels: activity.rows,
+            callOutcomes: calls.rows,
+            omitted: ['email_open', 'email_reply'],
+            omittedReason: 'activity.type has no open or reply event. Those rates are not claimed.',
+          },
+        };
+      }
+
+      case 'get_pipeline_attribution': {
+        const r = await db.query(
+          `SELECT
+             COALESCE(SUM(d.amount) FILTER (
+               WHERE EXISTS (
+                 SELECT 1 FROM activity a
+                 WHERE a.deal_id = d.id AND a.tenant_id = d.tenant_id AND a.actor_type = 'agent'
+               )
+             ), 0)::float AS agent_sourced,
+             COALESCE(SUM(d.amount) FILTER (
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM activity a
+                 WHERE a.deal_id = d.id AND a.tenant_id = d.tenant_id AND a.actor_type = 'agent'
+               )
+             ), 0)::float AS human_or_untouched,
+             COUNT(*) FILTER (
+               WHERE EXISTS (
+                 SELECT 1 FROM activity a
+                 WHERE a.deal_id = d.id AND a.tenant_id = d.tenant_id AND a.actor_type = 'agent'
+               )
+             )::int AS agent_sourced_deals,
+             COUNT(*)::int AS deals
+           FROM deal d WHERE d.tenant_id = $1 AND d.stage != 'Closed Won'`,
+          [tenantId],
+        );
+        return { result: r.rows[0] ?? {} };
+      }
+
+      case 'get_forecast_report': {
+        const table = process.env.REPORTING_TABLE;
+        if (!table) {
+          return { result: { available: false, reason: 'REPORTING_TABLE is not configured' } };
+        }
+        const item = await metering.send(new GetCommand({
+          TableName: table,
+          Key: { pk: `${tenantId}#report#pipeline_forecast`, sk: 'latest' },
+        }));
+        if (!item.Item) {
+          return { result: { available: false, reason: 'No pipeline_forecast with sk=latest. The forecasting agent writes this on its daily schedule.' } };
+        }
+        return { result: { available: true, report: item.Item } };
+      }
+
+      case 'get_personal_queue': {
+        const actorId = String(payload._actorId ?? payload.actorId ?? '');
+        const pending = await db.query(
+          `SELECT COUNT(*)::int AS n FROM activity
+           WHERE tenant_id = $1 AND COALESCE(metadata->>'status','') = 'awaiting_approval'`,
+          [tenantId],
+        );
+        const mine = actorId
+          ? await db.query(
+              `SELECT COUNT(*)::int AS n FROM activity
+               WHERE tenant_id = $1 AND actor_id = $2 AND occurred_at >= NOW() - INTERVAL '30 days'`,
+              [tenantId, actorId],
+            )
+          : { rows: [{ n: 0 }] };
+        const running = await db.query(
+          `SELECT COUNT(*)::int AS n FROM agent_run WHERE tenant_id = $1 AND status IN ('running','paused','pending')`,
+          [tenantId],
+        );
+        return {
+          result: {
+            awaitingApproval: pending.rows[0]?.n ?? 0,
+            myActivities30d: mine.rows[0]?.n ?? 0,
+            runningAgents: running.rows[0]?.n ?? 0,
+          },
+        };
+      }
+
+      case 'export_dsar': {
+        if (!('requestContext' in event) || !isManagerOrAdmin(event as APIGatewayProxyEvent)) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'Only admins and managers can export a data subject' }) };
+        }
+        const contactId = String(payload.contactId ?? '');
+        if (!contactId) return { statusCode: 400, body: JSON.stringify({ error: 'contactId is required' }) };
+        const contact = await db.query(
+          `SELECT * FROM contact WHERE tenant_id = $1 AND id = $2`,
+          [tenantId, contactId],
+        );
+        if (!contact.rows[0]) return { result: null };
+        const [consent, activities, runs, calls, enrichment] = await Promise.all([
+          db.query(`SELECT * FROM consent_record WHERE tenant_id = $1 AND contact_id = $2`, [tenantId, contactId]),
+          db.query(`SELECT * FROM activity WHERE tenant_id = $1 AND contact_id = $2 ORDER BY occurred_at DESC LIMIT 500`, [tenantId, contactId]),
+          db.query(`SELECT * FROM agent_run WHERE tenant_id = $1 AND contact_id = $2 ORDER BY started_at DESC LIMIT 200`, [tenantId, contactId]),
+          db.query(
+            `SELECT id, agent_run_id, contact_id, call_id, outcome, duration_seconds,
+                    transcript_s3_key, summary_json, schema_valid, occurred_at,
+                    ai_disclosure_delivered_at, ai_disclosure_text,
+                    calling_window_allowed, calling_window_reason, dnc_result
+             FROM call_result WHERE tenant_id = $1 AND contact_id = $2
+             ORDER BY occurred_at DESC LIMIT 200`,
+            [tenantId, contactId],
+          ),
+          db.query(`SELECT * FROM enrichment_record WHERE tenant_id = $1 AND contact_id = $2 ORDER BY fetched_at DESC LIMIT 200`, [tenantId, contactId]),
+        ]);
+        const eventsTable = process.env.DYNAMODB_TABLE;
+        let auditEvents: unknown[] = [];
+        if (eventsTable) {
+          const byPk = await metering.send(new QueryCommand({
+            TableName: eventsTable,
+            KeyConditionExpression: 'pk = :pk',
+            ExpressionAttributeValues: { ':pk': `${tenantId}#contact#${contactId}` },
+            Limit: 200,
+          }));
+          const byGsi = await metering.send(new QueryCommand({
+            TableName: eventsTable,
+            IndexName: 'gsi-contact',
+            KeyConditionExpression: 'contact_id = :c',
+            ExpressionAttributeValues: { ':c': contactId },
+            Limit: 500,
+          }));
+          const seen = new Set<string>();
+          auditEvents = [...(byPk.Items ?? []), ...(byGsi.Items ?? [])].filter((item) => {
+            if (item.tenantId && item.tenantId !== tenantId) return false;
+            const key = `${item.pk}#${item.sk}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+        }
+        return {
+          result: {
+            exportedAt: new Date().toISOString(),
+            tenantId,
+            contact: contact.rows[0],
+            consentRecords: consent.rows,
+            activities: activities.rows,
+            agentRuns: runs.rows,
+            callResults: calls.rows,
+            enrichmentRecords: enrichment.rows,
+            auditEvents,
+          },
+        };
+      }
+
+      case 'export_audit': {
+        if (!('requestContext' in event) || !isManagerOrAdmin(event as APIGatewayProxyEvent)) {
+          return { statusCode: 403, body: JSON.stringify({ error: 'Only admins and managers can export the audit log' }) };
+        }
+        const eventsTable = process.env.DYNAMODB_TABLE;
+        if (!eventsTable) {
+          return { result: { incomplete: true, reason: 'DYNAMODB_TABLE is not configured', items: [] } };
+        }
+        const contactId = typeof payload.contactId === 'string' ? payload.contactId : '';
+        const campaignId = typeof payload.campaignId === 'string' ? payload.campaignId : '';
+        const agentRunId = typeof payload.agentRunId === 'string' ? payload.agentRunId : '';
+        if (!contactId && !campaignId && !agentRunId) {
+          return {
+            result: {
+              incomplete: true,
+              reason: 'The events table has no tenant-wide GSI. Export by contactId, campaignId, or agentRunId.',
+              items: [],
+            },
+          };
+        }
+        const indexName = contactId ? 'gsi-contact' : campaignId ? 'gsi-campaign' : 'gsi-agent-run';
+        const keyName = contactId ? 'contact_id' : campaignId ? 'campaign_id' : 'agent_run_id';
+        const keyVal = contactId || campaignId || agentRunId;
+        const ev = await metering.send(new QueryCommand({
+          TableName: eventsTable,
+          IndexName: indexName,
+          KeyConditionExpression: `${keyName} = :k`,
+          ExpressionAttributeValues: { ':k': keyVal },
+          Limit: 500,
+        }));
+        return {
+          result: {
+            incomplete: false,
+            items: (ev.Items ?? []).filter((item) => item.tenantId === tenantId),
+          },
+        };
       }
 
       default:

@@ -25,6 +25,11 @@ resource "aws_apigatewayv2_integration" "voice_bridge" {
 }
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+# No API Gateway authorizer on $connect: voice-bridge verifies the Cognito ID
+# token (?token=) itself and returns 401/403 to reject the upgrade, then binds
+# the verified workspace to the connection record. Doing it in the integration
+# keeps the JWKS/SSM logic in one place and lets $default read the identity
+# from that record instead of trusting anything a client sends.
 resource "aws_apigatewayv2_route" "connect" {
   api_id    = aws_apigatewayv2_api.voice.id
   route_key = "$connect"

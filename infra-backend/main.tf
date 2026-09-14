@@ -56,6 +56,13 @@ module "data" {
 
 # ── Lambda functions ──────────────────────────────────────────────────────────
 # Depends only on data. Dynamic config (AppSync URL, SFN ARN) read from SSM.
+module "secrets" {
+  source  = "./modules/secrets"
+  project = local.project
+  env     = var.env
+  tags    = local.tags
+}
+
 module "lambda" {
   source  = "./modules/lambda"
   project = local.project
@@ -65,9 +72,17 @@ module "lambda" {
   dsql_endpoint       = module.data.dsql_cluster_endpoint
   dynamodb_table      = module.data.dynamodb_table_name
   dynamodb_stream_arn = module.data.dynamodb_stream_arn
-  # Phase 3: lambda depends on data only — no cycle
-  metering_table  = module.data.metering_table_name
-  reporting_table = module.data.reporting_table_name
+  metering_table      = module.data.metering_table_name
+  reporting_table     = module.data.reporting_table_name
+  app_secret_arn      = module.secrets.app_secret_arn
+
+  stripe_price_starter_monthly      = var.stripe_price_starter_monthly
+  stripe_price_starter_annual       = var.stripe_price_starter_annual
+  stripe_price_growth_monthly       = var.stripe_price_growth_monthly
+  stripe_price_growth_annual        = var.stripe_price_growth_annual
+  stripe_price_pack_call_minutes    = var.stripe_price_pack_call_minutes
+  stripe_price_pack_enrichment      = var.stripe_price_pack_enrichment
+  stripe_price_pack_concurrent_runs = var.stripe_price_pack_concurrent_runs
 }
 
 # ── Auth: Cognito, RBAC groups, tenant-provisioner trigger ───────────────────
@@ -79,6 +94,7 @@ module "auth" {
   tags    = local.tags
 
   crm_write_service_arn = module.lambda.crm_write_service_arn
+  crm_read_service_arn  = module.lambda.function_arns["crm-read"]
   web_base_urls         = local.web_base_urls
 }
 
@@ -97,6 +113,7 @@ module "api" {
   # Phase 2: SFN + SES wiring
   crm_write_service_arn         = module.lambda.crm_write_service_arn
   research_enrichment_agent_arn = module.agentcore.research_enrichment_runtime_arn
+  sequence_step_arn             = module.lambda.function_arns["sequence-step"]
   outreach_agent_arn            = module.agentcore.outreach_runtime_arn
   voice_agent_arn               = module.agentcore.voice_runtime_arn
   webhook_handler_arn           = module.lambda.function_arns["webhook-handler"]
@@ -161,6 +178,20 @@ resource "aws_ssm_parameter" "connect_instance_id" {
 
 # ── AgentCore: Runtime, Memory, Gateway, Identity ────────────────────────────
 # Depends on lambda (write/read service ARNs) and data (event bus + DynamoDB).
+# Inbound mail for the public contact addresses on impulsoiq.rinegansolutions.com.
+# Prod only: SES allows ONE active receipt rule set per account per region, and
+# the zone's MX record is published by infra-web's prod stack.
+module "mail" {
+  count   = var.env == "prod" ? 1 : 0
+  source  = "./modules/mail"
+  project = local.project
+  env     = var.env
+  tags    = local.tags
+
+  mail_domain = "impulsoiq.rinegansolutions.com"
+  forward_to  = var.contact_forward_to
+}
+
 module "agentcore" {
   source  = "./modules/agentcore"
   project = local.project
@@ -174,6 +205,7 @@ module "agentcore" {
   # Phase 3
   reporting_table = module.data.reporting_table_name
   metering_table  = module.data.metering_table_name
+  app_secret_arn  = module.secrets.app_secret_arn
 }
 
 # ── SSM parameters — written after all modules apply ─────────────────────────
@@ -266,5 +298,19 @@ resource "aws_ssm_parameter" "ambient_agent_arn" {
   name  = "/impulsoiq/${var.env}/backend/ambient_agent_arn"
   type  = "String"
   value = module.agentcore.ambient_interface_runtime_arn
+  tags  = local.tags
+}
+
+resource "aws_ssm_parameter" "clarification_agent_arn" {
+  name  = "/impulsoiq/${var.env}/backend/clarification_agent_arn"
+  type  = "String"
+  value = module.agentcore.agent_runtime_arns["clarification"]
+  tags  = local.tags
+}
+
+resource "aws_ssm_parameter" "deep_research_agent_arn" {
+  name  = "/impulsoiq/${var.env}/backend/deep_research_agent_arn"
+  type  = "String"
+  value = module.agentcore.deep_research_runtime_arn
   tags  = local.tags
 }

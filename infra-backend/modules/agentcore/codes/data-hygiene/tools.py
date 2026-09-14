@@ -121,15 +121,7 @@ def scan_for_decayed_records(tenant_id: str, inactive_days: int = 90) -> dict:
     These are candidates for re-enrichment or archival.
     DETERMINISTIC: date arithmetic query via CRM read.
     """
-    return _crm_read(
-        "get_activity_history",
-        {
-            "mode":         "decayed_scan",
-            "inactiveDays": inactive_days,
-            "missingFields": ["email", "title", "company"],
-        },
-        tenant_id,
-    )
+    return _crm_read("list_decayed_enrichment", {}, tenant_id)
 
 
 @tool

@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, animate, useInView } from 'framer-motion';
-import { ChevronRight, Zap, PhoneCall, Calendar, BarChart3 } from 'lucide-react';
-import { campaignsApi, contactsApi, dealsApi, agentRunsApi, dashboardApi } from '@/api/client';
+import { ChevronRight, Zap, PhoneCall, Calendar, BarChart3, Inbox } from 'lucide-react';
+import { campaignsApi, contactsApi, dealsApi, agentRunsApi, dashboardApi, insightsApi } from '@/api/client';
 import type { Campaign, Contact, Deal, AgentRun, DashboardStats } from '@/api/schemas';
 import { cn } from '@/lib/utils';
 import { AppShell } from '@/components/app/AppShell';
 import { SEO } from '@/components/SEO';
+import { useAuth, roleOf } from '@/lib/auth/useAuth';
 
 // ─── Data ─────────────────────────────────────────────────────────────────────
 // Everything on this screen now comes from crm-read. The previous version was
@@ -354,16 +355,144 @@ function TopContacts() {
 // To make this live: add a reporting read (Lambda -> reporting table), expose it
 // on the API, and restore the panel below from that response.
 function ForecastPanel() {
+  const [state, setState] = useState<{
+    available: boolean;
+    reason?: string;
+    report?: Record<string, unknown>;
+  } | null>(null);
+
+  useEffect(() => {
+    insightsApi.forecast()
+      .then(setState)
+      .catch(() => setState({ available: false, reason: 'Could not read the reporting table' }));
+  }, []);
+
+  const report = state?.report;
+  const forecast = (report?.forecast && typeof report.forecast === 'object')
+    ? report.forecast as Record<string, unknown>
+    : null;
+  const narratives = Array.isArray(report?.narratives) ? report.narratives as unknown[] : [];
+  const riskFlags = Array.isArray(report?.riskFlags) ? report.riskFlags as unknown[] : [];
+
   return (
-    <div className="bg-white dark:bg-[#0d1526] border border-slate-200 dark:border-white/[0.065] rounded-2xl p-8 text-center">
-      <BarChart3 className="mx-auto mb-3 text-slate-300 dark:text-slate-700" size={28} />
-      <p className="text-[0.9rem] font-bold text-slate-700 dark:text-slate-300 mb-1">
-        No forecast available yet
+    <div className="bg-white dark:bg-[#0d1526] border border-slate-200 dark:border-white/[0.065] rounded-2xl p-5">
+      <h3 className="text-[0.9rem] font-bold text-slate-900 dark:text-white mb-3">Pipeline forecast</h3>
+      {!state && <p className="text-[0.8rem] text-slate-400">Loading forecast…</p>}
+      {state && !state.available && (
+        <div className="text-center py-4">
+          <BarChart3 className="mx-auto mb-3 text-slate-300 dark:text-slate-700" size={28} />
+          <p className="text-[0.9rem] font-bold text-slate-700 dark:text-slate-300 mb-1">
+            No forecast published yet
+          </p>
+          <p className="text-[0.8rem] text-slate-400 dark:text-slate-600 max-w-sm mx-auto">
+            {state.reason ?? 'The forecasting agent writes pk={tenant}#report#pipeline_forecast, sk=latest on its daily schedule.'}
+          </p>
+        </div>
+      )}
+      {state?.available && (
+        <div className="space-y-3">
+          {forecast && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <p className="text-[0.72rem] text-slate-500">Weighted forecast</p>
+                <p className="text-[1.2rem] font-extrabold tabular-nums">{fmt(Number(forecast.weightedForecast ?? 0))}</p>
+              </div>
+              <div>
+                <p className="text-[0.72rem] text-slate-500">Open pipeline</p>
+                <p className="text-[1.2rem] font-extrabold tabular-nums">{fmt(Number(forecast.totalPipeline ?? 0))}</p>
+              </div>
+            </div>
+          )}
+          {typeof report?.period === 'string' && (
+            <p className="text-[0.72rem] text-slate-400">Period {report.period}{typeof report.generatedAt === 'string' ? ` · ${report.generatedAt}` : ''}</p>
+          )}
+          {narratives.length > 0 && (
+            <ul className="text-[0.8rem] text-slate-600 dark:text-slate-400 space-y-1">
+              {narratives.slice(0, 5).map((n, i) => (
+                <li key={i}>{String(n)}</li>
+              ))}
+            </ul>
+          )}
+          <p className="text-[0.72rem] text-slate-400">{riskFlags.length} risk flag{riskFlags.length === 1 ? '' : 's'} in the latest report.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AttributionPanel() {
+  const [row, setRow] = useState<{
+    agentSourced: number;
+    humanOrUntouched: number;
+    agentSourcedDeals: number;
+    deals: number;
+  } | null>(null);
+
+  useEffect(() => {
+    insightsApi.pipelineAttribution().then(setRow).catch(() => setRow(null));
+  }, []);
+
+  const agent = row?.agentSourced ?? 0;
+  const rest = row?.humanOrUntouched ?? 0;
+  const sum = agent + rest || 1;
+
+  return (
+    <div className="bg-white dark:bg-[#0d1526] border border-slate-200 dark:border-white/[0.065] rounded-2xl p-5">
+      <h3 className="text-[0.9rem] font-bold text-slate-900 dark:text-white mb-1">Agent-touched vs other pipeline</h3>
+      <p className="text-[0.75rem] text-slate-400 mb-4">
+        Open deal dollars with at least one agent activity, versus deals with none. Not a sourced-closed attribution.
       </p>
-      <p className="text-[0.8rem] text-slate-400 dark:text-slate-600 max-w-sm mx-auto">
-        The Forecasting &amp; Insight Agent publishes a pipeline forecast on its
-        daily schedule. Reports are not yet exposed through the API.
-      </p>
+      {!row ? (
+        <p className="text-[0.8rem] text-slate-400">Loading attribution…</p>
+      ) : row.deals === 0 ? (
+        <p className="text-[0.8rem] text-slate-400">No open deals.</p>
+      ) : (
+        <>
+          <div className="flex h-3 rounded-full overflow-hidden bg-slate-100 dark:bg-white/[0.06] mb-3">
+            <div className="bg-indigo-500" style={{ width: `${(agent / sum) * 100}%` }} />
+            <div className="bg-slate-400" style={{ width: `${(rest / sum) * 100}%` }} />
+          </div>
+          <div className="grid grid-cols-2 gap-3 text-[0.8rem]">
+            <div>
+              <p className="text-slate-500">Agent activity on deal</p>
+              <p className="font-bold tabular-nums">{fmt(agent)} · {row.agentSourcedDeals} deals</p>
+            </div>
+            <div>
+              <p className="text-slate-500">Human or untouched</p>
+              <p className="font-bold tabular-nums">{fmt(rest)} · {row.deals - row.agentSourcedDeals} deals</p>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function MemberQueue() {
+  const [q, setQ] = useState<{ awaitingApproval: number; myActivities30d: number; runningAgents: number } | null>(null);
+  useEffect(() => {
+    insightsApi.personalQueue().then(setQ).catch(() => setQ(null));
+  }, []);
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+      <KPICard
+        title="Awaiting your team’s approval"
+        value={q?.awaitingApproval ?? 0}
+        icon={<Inbox size={16} className="text-amber-600 dark:text-amber-400" />}
+        iconBg="bg-amber-100 dark:bg-amber-500/15"
+      />
+      <KPICard
+        title="Your activities (30d)"
+        value={q?.myActivities30d ?? 0}
+        icon={<Calendar size={16} className="text-indigo-600 dark:text-indigo-400" />}
+        iconBg="bg-indigo-100 dark:bg-indigo-500/15"
+      />
+      <KPICard
+        title="Agents in flight"
+        value={q?.runningAgents ?? 0}
+        icon={<Zap size={16} className="text-violet-600 dark:text-violet-400" />}
+        iconBg="bg-violet-100 dark:bg-violet-500/15"
+      />
     </div>
   );
 }
@@ -375,8 +504,9 @@ export default function DashboardPage() {
   const now = new Date();
   const hour = now.getHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  const { user } = useAuth();
+  const manager = !!user && (roleOf(user) === 'admin' || roleOf(user) === 'manager');
 
-  // One aggregate query backs all four KPI tiles.
   const [stats, setStats] = useState<DashboardStats | null>(null);
   useEffect(() => {
     dashboardApi.stats().then(setStats).catch(() => setStats(null));
@@ -387,7 +517,6 @@ export default function DashboardPage() {
       <SEO title="Dashboard — ImpulsoIQ" description="Your AI revenue intelligence dashboard" />
       <div className="px-4 sm:px-6 py-6 max-w-[1600px] mx-auto">
 
-        {/* Page header */}
         <motion.div
           className="mb-6"
           initial={{ opacity: 0, y: -10 }}
@@ -398,52 +527,69 @@ export default function DashboardPage() {
             {greeting} 👋
           </h1>
           <p className="text-[0.84rem] text-slate-500 dark:text-slate-400 mt-0.5">
-            Here's your revenue intelligence for {now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}.
+            {manager
+              ? `Pipeline and agent-touched dollars for ${now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}.`
+              : `Your queue for ${now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}.`}
           </p>
         </motion.div>
 
-        {/* KPI cards — all five values come from one aggregate query. */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-          <KPICard
-            title="Pipeline Value"
-            value={stats?.pipelineValue ?? 0} prefix="$"
-            icon={<Zap size={16} className="text-indigo-600 dark:text-indigo-400" />}
-            iconBg="bg-indigo-100 dark:bg-indigo-500/15"
-          />
-          <KPICard
-            title="Contacts"
-            value={stats?.totalContacts ?? 0}
-            icon={<Calendar size={16} className="text-emerald-600 dark:text-emerald-400" />}
-            iconBg="bg-emerald-100 dark:bg-emerald-500/15"
-          />
-          <KPICard
-            title="Agents Running"
-            value={stats?.runningAgents ?? 0}
-            icon={<Zap size={16} className="text-violet-600 dark:text-violet-400" />}
-            iconBg="bg-violet-100 dark:bg-violet-500/15"
-          />
-          <KPICard
-            title="Active Campaigns"
-            value={stats?.activeCampaigns ?? 0}
-            icon={<PhoneCall size={16} className="text-amber-600 dark:text-amber-400" />}
-            iconBg="bg-amber-100 dark:bg-amber-500/15"
-          />
-        </div>
+        {manager ? (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <KPICard
+              title="Pipeline Value"
+              value={stats?.pipelineValue ?? 0} prefix="$"
+              icon={<Zap size={16} className="text-indigo-600 dark:text-indigo-400" />}
+              iconBg="bg-indigo-100 dark:bg-indigo-500/15"
+            />
+            <KPICard
+              title="Contacts"
+              value={stats?.totalContacts ?? 0}
+              icon={<Calendar size={16} className="text-emerald-600 dark:text-emerald-400" />}
+              iconBg="bg-emerald-100 dark:bg-emerald-500/15"
+            />
+            <KPICard
+              title="Agents Running"
+              value={stats?.runningAgents ?? 0}
+              icon={<Zap size={16} className="text-violet-600 dark:text-violet-400" />}
+              iconBg="bg-violet-100 dark:bg-violet-500/15"
+            />
+            <KPICard
+              title="Active Campaigns"
+              value={stats?.activeCampaigns ?? 0}
+              icon={<PhoneCall size={16} className="text-amber-600 dark:text-amber-400" />}
+              iconBg="bg-amber-100 dark:bg-amber-500/15"
+            />
+          </div>
+        ) : (
+          <MemberQueue />
+        )}
 
-        {/* Middle: campaigns + pipeline */}
+        {manager && (
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-4">
+            <AttributionPanel />
+            <ForecastPanel />
+          </div>
+        )}
+
         <div className="grid grid-cols-1 xl:grid-cols-[1fr_360px] gap-4 mb-4">
           <CampaignTable />
-          <PipelineFunnel />
+          {manager ? <PipelineFunnel /> : (
+            <div className="bg-white dark:bg-[#0d1526] border border-slate-200 dark:border-white/[0.065] rounded-2xl p-5">
+              <h3 className="text-[0.9rem] font-bold text-slate-900 dark:text-white mb-2">Next actions</h3>
+              <Link to="/approvals" className="text-[0.84rem] font-semibold text-indigo-600 dark:text-indigo-400">
+                Open the approvals queue <ChevronRight size={12} className="inline" />
+              </Link>
+              <p className="mt-2 text-[0.78rem] text-slate-400">
+                Personal queue counts use your Cognito user id on activities you authored.
+              </p>
+            </div>
+          )}
         </div>
 
-        {/* Bottom: agent feed + top contacts */}
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-4">
           <AgentFeed />
           <TopContacts />
         </div>
-
-        {/* Phase 3: Forecast + risk flags */}
-        <ForecastPanel />
 
       </div>
     </AppShell>

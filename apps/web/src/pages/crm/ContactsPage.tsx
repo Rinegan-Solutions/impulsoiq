@@ -1,10 +1,12 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, FormEvent } from 'react';
+import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Search, Plus, MoreHorizontal, ArrowUpDown, ChevronLeft, ChevronRight } from 'lucide-react';
-import { contactsApi } from '@/api/client';
-import type { Contact } from '@/api/schemas';
+import { accountsApi, contactsApi } from '@/api/client';
+import type { Account, Contact } from '@/api/schemas';
 import { AppShell } from '@/components/app/AppShell';
 import { SEO } from '@/components/SEO';
+import { RecordForm, Field, fieldClass } from '@/components/app/RecordForm';
 import { cn } from '@/lib/utils';
 
 const STAGE_CLS: Record<string, string> = {
@@ -42,6 +44,10 @@ export default function ContactsPage() {
   const [debouncedSearch, setDS]  = useState('');
   const [loading, setLoading]     = useState(true);
   const [selected, setSelected]   = useState<Set<string>>(new Set());
+  const [creating, setCreating]   = useState(false);
+  const [accounts, setAccounts]   = useState<Account[]>([]);
+  const [form, setForm]           = useState({ firstName: '', lastName: '', email: '', title: '', accountId: '' });
+  const [saving, setSaving]       = useState(false);
 
   // Debounce search
   useEffect(() => {
@@ -62,6 +68,28 @@ export default function ContactsPage() {
   useEffect(() => { load(); }, [load]);
   useEffect(() => { setPage(1); }, [debouncedSearch]);
 
+  async function createContact(e: FormEvent) {
+    e.preventDefault();
+    if (!form.firstName.trim() || !form.lastName.trim()) return;
+    setSaving(true);
+    try {
+      await contactsApi.create({
+        firstName: form.firstName.trim(),
+        lastName: form.lastName.trim(),
+        email: form.email.trim() || undefined,
+        title: form.title.trim() || undefined,
+        accountId: form.accountId || undefined,
+        stage: 'Prospecting',
+        score: 0,
+      } as Partial<Contact>);
+      setCreating(false);
+      setForm({ firstName: '', lastName: '', email: '', title: '', accountId: '' });
+      await load();
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const toggleAll = () => setSelected(s => s.size === contacts.length ? new Set() : new Set(contacts.map(c => c.id)));
   const toggleOne = (id: string) => setSelected(s => { const n = new Set(s); if (n.has(id)) { n.delete(id); } else { n.add(id); } return n; });
 
@@ -78,7 +106,14 @@ export default function ContactsPage() {
             <h1 className="text-[1.25rem] font-extrabold tracking-tight text-slate-900 dark:text-white">Contacts</h1>
             <p className="text-[0.82rem] text-slate-500 dark:text-slate-400 mt-0.5">{total.toLocaleString()} total contacts</p>
           </div>
-          <button className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:shadow-lg hover:shadow-indigo-500/25 hover:-translate-y-0.5 transition-all">
+          <button
+            type="button"
+            onClick={() => {
+              setCreating(true);
+              void accountsApi.list(1, 50).then((r) => setAccounts(r.items)).catch(() => setAccounts([]));
+            }}
+            className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:shadow-lg hover:shadow-indigo-500/25 hover:-translate-y-0.5 transition-all"
+          >
             <Plus size={15} /> Add contact
           </button>
         </div>
@@ -131,7 +166,12 @@ export default function ContactsPage() {
             <div className="py-16 text-center text-[0.84rem] text-slate-400 dark:text-slate-600">Loading contacts…</div>
           ) : contacts.length === 0 ? (
             <div className="py-16 text-center text-[0.84rem] text-slate-400 dark:text-slate-600">
-              {debouncedSearch ? `No contacts matching "${debouncedSearch}"` : 'No contacts yet'}
+              {debouncedSearch ? `No contacts matching "${debouncedSearch}"` : (
+                <>
+                  No contacts yet.{' '}
+                  <Link to="/home?intent=compose&starter=draft_outreach" className="text-indigo-600 font-semibold">Start from Home</Link>
+                </>
+              )}
             </div>
           ) : (
             contacts.map((c, i) => (
@@ -140,7 +180,7 @@ export default function ContactsPage() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 transition={{ delay: i * 0.02 }}
-                className="grid px-4 py-3 border-b border-slate-50 dark:border-white/[0.03] last:border-0 items-center text-[0.82rem] hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors group cursor-pointer"
+                className="grid px-4 py-3 border-b border-slate-50 dark:border-white/[0.03] last:border-0 items-center text-[0.82rem] hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors group"
                 style={{ gridTemplateColumns: '40px 1fr 160px 140px 90px 90px 80px 40px' }}
               >
                 <span onClick={e => { e.stopPropagation(); toggleOne(c.id); }}>
@@ -151,11 +191,15 @@ export default function ContactsPage() {
                     {c.firstName[0]}{c.lastName[0]}
                   </div>
                   <div className="min-w-0">
-                    <p className="font-semibold text-slate-800 dark:text-slate-200 truncate">{c.firstName} {c.lastName}</p>
+                    <p className="font-semibold text-slate-800 dark:text-slate-200 truncate">
+                      <Link to={`/contacts/${c.id}`} className="hover:text-indigo-600 dark:hover:text-indigo-400">{c.firstName} {c.lastName}</Link>
+                    </p>
                     <p className="text-[0.72rem] text-slate-400 dark:text-slate-600 truncate">{c.email}</p>
                   </div>
                 </div>
-                <span className="text-slate-600 dark:text-slate-400 truncate">{c.accountName ?? '—'}</span>
+                <span className="text-slate-600 dark:text-slate-400 truncate">
+                  {c.accountId ? <Link to={`/accounts/${c.accountId}`} className="hover:underline">{c.accountName ?? '—'}</Link> : (c.accountName ?? '—')}
+                </span>
                 <span className="text-slate-500 dark:text-slate-500 truncate">{c.title}</span>
                 <span className="text-center">
                   {c.stage && <span className={cn('text-[0.65rem] font-semibold px-2 py-0.5 rounded-lg', STAGE_CLS[c.stage])}>{c.stage}</span>}
@@ -192,6 +236,20 @@ export default function ContactsPage() {
           </div>
         )}
       </div>
+      {creating && (
+        <RecordForm title="New contact" onClose={() => setCreating(false)} onSubmit={(e) => void createContact(e)} busy={saving}>
+          <Field label="First name"><input required className={fieldClass} value={form.firstName} onChange={(e) => setForm({ ...form, firstName: e.target.value })} /></Field>
+          <Field label="Last name"><input required className={fieldClass} value={form.lastName} onChange={(e) => setForm({ ...form, lastName: e.target.value })} /></Field>
+          <Field label="Email"><input type="email" className={fieldClass} value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
+          <Field label="Title"><input className={fieldClass} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></Field>
+          <Field label="Company">
+            <select className={fieldClass} value={form.accountId} onChange={(e) => setForm({ ...form, accountId: e.target.value })}>
+              <option value="">None</option>
+              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </Field>
+        </RecordForm>
+      )}
     </AppShell>
   );
 }

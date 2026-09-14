@@ -1,22 +1,18 @@
 /**
  * AppSync Publisher — DynamoDB Streams → AppSync real-time push.
  *
- * Triggered by DynamoDB Streams from the events table.
- * For each NEW_IMAGE record relating to agent actions, publishes
- * a publishAgentAction mutation to AppSync so the Agent Control Panel
- * receives real-time updates.
- *
- * Auth: AWS IAM signing (not API key) — the Lambda's execution role
- *       must have appsync:GraphQL on the AppSync API ARN.
+ * Auth: AWS IAM signing. APPSYNC_URL is resolved from SSM at cold start
+ * (Terraform cannot inject the URL without a lambda→api cycle).
  */
 import type { DynamoDBStreamHandler } from 'aws-lambda';
 import { SignatureV4 } from '@aws-sdk/signature-v4';
 import { Sha256 } from '@aws-crypto/sha256-js';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import https from 'https';
 import { URL } from 'url';
 
-const REGION       = process.env.AWS_REGION ?? 'eu-west-2';
-const APPSYNC_URL  = process.env.APPSYNC_URL!;
+const REGION = process.env.AWS_REGION ?? 'eu-west-2';
+const ssm = new SSMClient({ region: REGION });
 
 const PUBLISH_MUTATION = /* GraphQL */ `
   mutation PublishAgentAction($input: AgentActionInput!) {
@@ -30,13 +26,32 @@ const PUBLISH_MUTATION = /* GraphQL */ `
   }
 `;
 
-// ── SigV4 signed GraphQL request ─────────────────────────────────────────────
+let appsyncUrlCache: string | undefined;
 
-async function signedPost(body: string): Promise<void> {
-  const url    = new URL(APPSYNC_URL);
+async function appsyncUrl(): Promise<string> {
+  if (process.env.APPSYNC_URL) return process.env.APPSYNC_URL;
+  if (appsyncUrlCache) return appsyncUrlCache;
+  const path = process.env.APPSYNC_URL_SSM_PATH;
+  if (!path) throw new Error('APPSYNC_URL is not configured');
+  const resp = await ssm.send(new GetParameterCommand({ Name: path }));
+  const value = resp.Parameter?.Value ?? '';
+  if (!value) throw new Error('APPSYNC_URL_SSM_PATH resolved empty');
+  appsyncUrlCache = value;
+  return value;
+}
+
+function attrS(image: Record<string, { S?: string; M?: Record<string, unknown> }>, key: string): string {
+  return image[key]?.S ?? '';
+}
+
+function nestedS(image: Record<string, { M?: Record<string, { S?: string }> }>, key: string): string {
+  return image.data?.M?.[key]?.S ?? '';
+}
+
+async function signedPost(endpoint: string, body: string): Promise<void> {
+  const url    = new URL(endpoint);
   const signer = new SignatureV4({
     credentials: {
-      // Lambda execution role credentials from environment
       accessKeyId:     process.env.AWS_ACCESS_KEY_ID!,
       secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
       sessionToken:    process.env.AWS_SESSION_TOKEN,
@@ -87,34 +102,31 @@ async function signedPost(body: string): Promise<void> {
   });
 }
 
-// ── Stream handler ────────────────────────────────────────────────────────────
-
 export const handler: DynamoDBStreamHandler = async (event) => {
+  const endpoint = await appsyncUrl();
+
   for (const record of event.Records) {
     if (record.eventName !== 'INSERT' && record.eventName !== 'MODIFY') continue;
 
-    const image = record.dynamodb?.NewImage;
+    const image = record.dynamodb?.NewImage as Record<string, { S?: string; M?: Record<string, { S?: string }> }> | undefined;
     if (!image) continue;
 
-    // Parse DynamoDB image — attributes are DynamoDB typed maps
-    const pk         = image.pk?.S ?? '';
-    const eventType  = image.eventType?.S ?? '';
-    const entityType = image.entityType?.S ?? '';
-    const tenantId   = image.tenantId?.S ?? '';
+    const entityType = attrS(image, 'entityType');
+    const eventType  = attrS(image, 'eventType');
+    const tenantId   = attrS(image, 'tenantId');
 
-    // Only forward agent-run and action events to AppSync
     if (entityType !== 'agent_run' && !eventType.startsWith('agent_')) continue;
 
     const agentAction = {
-      id:          image.id?.S ?? pk,
+      id:          attrS(image, 'entityId') || attrS(image, 'pk'),
       tenantId,
-      agentRunId:  image.entityId?.S ?? '',
-      agentType:   image.agentType?.S ?? 'coordinator',
-      action:      eventType,
-      status:      image.status?.S ?? 'running',
-      input:       image.inputJson?.S  ? JSON.parse(image.inputJson.S)  : null,
-      output:      image.outputJson?.S ? JSON.parse(image.outputJson.S) : null,
-      occurredAt:  image.timestamp?.S ?? new Date().toISOString(),
+      agentRunId:  attrS(image, 'entityId'),
+      agentType:   attrS(image, 'agentType') || nestedS(image, 'agentType') || 'coordinator',
+      action:      eventType || nestedS(image, 'operation') || 'updated',
+      status:      attrS(image, 'status') || nestedS(image, 'status') || 'running',
+      input:       null,
+      output:      null,
+      occurredAt:  attrS(image, 'occurredAt') || new Date().toISOString(),
     };
 
     const body = JSON.stringify({
@@ -123,10 +135,9 @@ export const handler: DynamoDBStreamHandler = async (event) => {
     });
 
     try {
-      await signedPost(body);
+      await signedPost(endpoint, body);
     } catch (err) {
-      console.error('AppSync publish failed', { pk, eventType, error: (err as Error).message });
-      // Non-fatal — best-effort real-time push; audit log is source of truth
+      console.error('AppSync publish failed', { tenantId, eventType, error: (err as Error).message });
     }
   }
 };

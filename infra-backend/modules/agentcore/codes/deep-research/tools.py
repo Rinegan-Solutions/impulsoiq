@@ -12,7 +12,10 @@ import json
 import os
 import datetime
 import boto3
+import httpx
 from strands import tool
+
+from impulsoiq_secrets import app_secret
 
 _lambda = boto3.client("lambda", region_name=os.environ.get("AWS_REGION", "eu-west-2"))
 _dynamo = boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION", "eu-west-2"))
@@ -92,6 +95,29 @@ def get_closed_won_profiles(tenant_id: str, limit: int = 20) -> dict:
     return {"profiles": (deals.get("result") or [])[:limit]}
 
 
+def _stub_allowed() -> bool:
+    """
+    Fabricated research results are NEVER allowed in production.
+
+    This tool used to return "Company 1 (via firmographic_match)" rows
+    unconditionally, and the synthesis step ranked them into a report the
+    customer reads — invented companies presented as research. Same rule as the
+    voice provider stub: off-prod only, and only when explicitly switched on.
+    """
+    if os.environ.get("ENV", "dev") == "prod":
+        return False
+    return os.environ.get("ALLOW_RESEARCH_STUB", "").lower() == "true"
+
+
+def _search_provider() -> tuple[str, str]:
+    url = (os.environ.get("RESEARCH_SEARCH_API_URL", "")
+           or os.environ.get("ENRICHMENT_API_URL", "")).rstrip("/")
+    key = (os.environ.get("RESEARCH_SEARCH_API_KEY", "")
+           or os.environ.get("ENRICHMENT_API_KEY", "")
+           or app_secret("enrichment_api_key"))
+    return url, key
+
+
 @tool
 def search_public_signals(
     query:    str,
@@ -99,20 +125,62 @@ def search_public_signals(
     limit:    int = 10,
 ) -> dict:
     """
-    Search for companies matching a research query using public signals.
-    For the hackathon, this is a stub that returns structured placeholder data.
-    In production: integrates with Clearbit, Apollo, or a web search tool.
+    Search for companies matching a research query using a licensed provider.
 
     strategy: describes what signal type to look for
               ('firmographic_match', 'technographic_match', 'news_signal', 'lookalike')
+
+    Returns { results: [...], query, strategy, source } when a provider answers.
+    When no provider is configured this returns an EMPTY result list and a
+    human-visible `gap` — never invented company names. If you receive a gap,
+    say so in your findings instead of naming companies.
     """
-    # Stub — production implementation calls enrichment API or AgentCore Browser tool
-    placeholder_results = [
-        {"company": f"Company {i+1} (via {strategy})", "source": "enrichment_api_stub",
-         "signal": query, "confidence": round(0.9 - i * 0.08, 2)}
-        for i in range(min(limit, 5))
-    ]
-    return {"results": placeholder_results, "query": query, "strategy": strategy, "isStub": True}
+    url, key = _search_provider()
+    gap = ""
+
+    if url and key:
+        try:
+            resp = httpx.post(
+                f"{url}/search",
+                json={"query": query, "strategy": strategy, "limit": limit},
+                headers={"X-API-Key": key},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                results = resp.json().get("results", [])
+                return {
+                    "results": results[:limit] if isinstance(results, list) else [],
+                    "query": query,
+                    "strategy": strategy,
+                    "source": "search_api",
+                }
+            gap = f"provider_http_{resp.status_code}"
+        except Exception as exc:
+            gap = f"provider_error:{type(exc).__name__}"
+    elif _stub_allowed():
+        return {
+            "results": [
+                {"company": f"Company {i+1} (via {strategy})", "source": "research_stub",
+                 "signal": query, "confidence": round(0.9 - i * 0.08, 2)}
+                for i in range(min(limit, 5))
+            ],
+            "query": query,
+            "strategy": strategy,
+            "isStub": True,
+        }
+    else:
+        gap = "no_research_provider"
+
+    return {
+        "results": [],
+        "query": query,
+        "strategy": strategy,
+        "gap": gap,
+        "message": (
+            "No company-search provider is configured for this environment, so no "
+            "companies can be named. Report this gap instead of guessing."
+        ),
+    }
 
 
 @tool

@@ -70,7 +70,9 @@ RULES: list[tuple[re.Pattern[str], str, str]] = [
     (
         # ADD COLUMN carrying anything beyond `name type [STORAGE ...]`
         re.compile(
-            r"\bADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?\w+\s+[\w()\[\], ]*?"
+            # (?!CONSTRAINT\b) — ADD CONSTRAINT is a different action with its
+            # own rule below; without this it matched "ADD CONSTRAINT x CHECK (".
+            r"\bADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?!CONSTRAINT\b)\w+\s+[\w()\[\], ]*?"
             r"\b(NOT\s+NULL|DEFAULT|CHECK|UNIQUE|REFERENCES|PRIMARY\s+KEY)\b",
             re.I,
         ),

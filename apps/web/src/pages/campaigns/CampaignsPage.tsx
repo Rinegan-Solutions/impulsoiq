@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Plus, Play, Pause, MoreHorizontal, ChevronRight, Zap } from 'lucide-react';
-import { campaignsApi } from '@/api/client';
-import type { Campaign } from '@/api/schemas';
+import { campaignsApi, sequencesApi } from '@/api/client';
+import type { Campaign, Sequence } from '@/api/schemas';
 import { AppShell } from '@/components/app/AppShell';
 import { SEO } from '@/components/SEO';
 import { cn } from '@/lib/utils';
@@ -47,6 +48,7 @@ function StatPill({ label, value, highlight = false }: { label: string; value: s
 
 export default function CampaignsPage() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [sequences, setSequences] = useState<Sequence[]>([]);
   const [loading, setLoading]     = useState(true);
   const [filter, setFilter]       = useState<string>('all');
 
@@ -54,11 +56,19 @@ export default function CampaignsPage() {
     setLoading(true);
     try {
       setCampaigns(await campaignsApi.list());
+      setSequences(await sequencesApi.list().catch(() => []));
     } catch { /* error */ }
     finally { setLoading(false); }
   }
 
   useEffect(() => { load(); }, []);
+
+  async function attachSequence(c: Campaign, sequenceId: string) {
+    try {
+      await campaignsApi.attachSequence(c, sequenceId);
+      await load();
+    } catch { /* keep last list */ }
+  }
 
   async function toggleStatus(c: Campaign) {
     try {
@@ -84,9 +94,12 @@ export default function CampaignsPage() {
             <h1 className="text-[1.25rem] font-extrabold tracking-tight text-slate-900 dark:text-white">Campaigns</h1>
             <p className="text-[0.82rem] text-slate-500 dark:text-slate-400 mt-0.5">{counts.active} active · {counts.paused} paused · {counts.completed} completed</p>
           </div>
-          <button className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:shadow-lg hover:shadow-indigo-500/25 hover:-translate-y-0.5 transition-all">
+          <Link
+            to="/home?intent=compose"
+            className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:shadow-lg hover:shadow-indigo-500/25 hover:-translate-y-0.5 transition-all"
+          >
             <Plus size={15} /> New campaign
-          </button>
+          </Link>
         </div>
 
         {/* Filter tabs */}
@@ -165,28 +178,41 @@ export default function CampaignsPage() {
                     <StatPill label="Meetings" value={c.meetingsBooked ?? 0} highlight />
                   </div>
 
+                  <label className="block text-[0.7rem] font-semibold text-slate-400 mb-1">Sequence</label>
+                  <select
+                    className="w-full h-8 mb-3 rounded-lg border border-slate-200 dark:border-white/[0.1] bg-transparent text-[0.78rem] px-2"
+                    value={String((c.config as Record<string, unknown> | undefined)?.sequenceId ?? '')}
+                    onChange={(e) => void attachSequence(c, e.target.value)}
+                  >
+                    <option value="">Default email → wait 48h → call</option>
+                    {sequences.map((s) => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+
                   {/* Footer link */}
-                  <button className="mt-3 w-full flex items-center justify-center gap-1.5 text-[0.75rem] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline opacity-0 group-hover:opacity-100 transition-opacity">
-                    View details <ChevronRight size={12} />
-                  </button>
+                  <Link
+                    to={`/control-panel?campaign=${c.id}`}
+                    className="mt-3 w-full flex items-center justify-center gap-1.5 text-[0.75rem] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline opacity-0 group-hover:opacity-100 transition-opacity"
+                  >
+                    View in Control Panel <ChevronRight size={12} />
+                  </Link>
                 </motion.div>
               );
             })}
 
             {/* New campaign placeholder */}
-            <motion.button
-              initial={{ opacity: 0, y: 16 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: filtered.length * 0.06, duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+            <Link
+              to="/home?intent=compose"
               className="bg-slate-50 dark:bg-white/[0.015] border-2 border-dashed border-slate-200 dark:border-white/[0.07] rounded-2xl p-5 flex flex-col items-center justify-center gap-2 min-h-[180px] hover:border-indigo-400 dark:hover:border-indigo-500/50 hover:bg-indigo-50/30 dark:hover:bg-indigo-500/5 transition-all group"
             >
               <div className="w-9 h-9 rounded-xl bg-indigo-100 dark:bg-indigo-500/15 flex items-center justify-center group-hover:scale-110 transition-transform">
                 <Zap size={16} className="text-indigo-600 dark:text-indigo-400" />
               </div>
               <span className="text-[0.82rem] font-semibold text-slate-500 dark:text-slate-500 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
-                Launch new campaign
-              </span>
-            </motion.button>
+              Launch new campaign
+            </span>
+            </Link>
           </div>
         )}
       </div>

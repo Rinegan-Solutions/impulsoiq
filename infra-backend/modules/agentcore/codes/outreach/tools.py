@@ -157,21 +157,24 @@ def validate_sms_compliance(message: str) -> dict:
     return {"valid": valid, "missing": missing}
 
 
+def _is_prod() -> bool:
+    return os.environ.get("ENV", "dev") == "prod"
+
+
 @tool
 def check_send_pause(tenant_id: str) -> dict:
     """
     Check if email/SMS sending has been paused for this tenant due to a
-    SES reputation alarm (bounce rate > 5% or complaint rate > 0.1%).
+    SES reputation alarm or an account-wide kill.
 
     MUST be called and MUST return { paused: false } before any send.
-    If paused is true, STOP and log an activity with type=note explaining
-    the pause rather than attempting to send.
-
-    Returns { paused: bool, reason?: str }
+    Fail closed in production if DynamoDB cannot be read.
     """
-    table    = os.environ.get("DYNAMODB_TABLE", "")
+    table = os.environ.get("DYNAMODB_TABLE", "")
     if not table:
-        return {"paused": False}  # Fail open if table not configured
+        if _is_prod():
+            return {"paused": True, "reason": "send_pause_table_unconfigured"}
+        return {"paused": False}
 
     keys_to_check = [
         {"pk": {"S": f"{tenant_id}#send_flags#send_pause"}, "sk": {"S": "current"}},
@@ -186,9 +189,37 @@ def check_send_pause(tenant_id: str) -> dict:
                     "paused": True,
                     "reason": item.get("reason", {}).get("S", "reputation_alarm"),
                 }
-        except Exception:
-            pass  # Fail open — don't block send on DynamoDB error
+        except Exception as exc:
+            if _is_prod():
+                return {"paused": True, "reason": f"send_pause_check_failed:{exc}"}
     return {"paused": False}
+
+
+def _canspam_footer() -> str:
+    company = os.environ.get("CANSPAM_COMPANY_NAME", "ImpulsoIQ")
+    address = os.environ.get(
+        "CANSPAM_PHYSICAL_ADDRESS",
+        "ImpulsoIQ, c/o Rinegan Solutions, United Kingdom",
+    )
+    unsub = os.environ.get(
+        "CANSPAM_UNSUB_URL",
+        "https://impulsoiq.rinegansolutions.com/unsubscribe",
+    )
+    return (
+        '<hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0 12px"/>'
+        f'<p style="font-size:12px;color:#64748b;line-height:1.5">'
+        f'You are receiving this email from {company}.<br/>{address}<br/>'
+        f'<a href="{unsub}">Unsubscribe</a> · '
+        f'Reply STOP to opt out of further email.'
+        f'</p>'
+    )
+
+
+def _with_canspam_footer(body: str) -> str:
+    marker = 'data-impulsoiq-canspam="1"'
+    if marker in body:
+        return body
+    return f'{body}\n<div {marker}>{_canspam_footer()}</div>'
 
 
 @tool
@@ -240,6 +271,7 @@ def send_email_via_ses(
     subject:           str,
     body:              str,
     configuration_set: str,
+    allow_unverified:  bool = False,
 ) -> dict:
     """
     Send an email via Amazon SES.
@@ -252,8 +284,26 @@ def send_email_via_ses(
     After sending, call write_activity to record the outbound email.
     Returns { ok: bool, messageId: str }
     """
+    pause = check_send_pause(tenant_id)
+    if pause.get("paused"):
+        return {"ok": False, "error": "send_paused", "reason": pause.get("reason")}
+
+    verify = _invoke_lambda(os.environ["CRM_READ_SERVICE_ARN"], {
+        "operation": "get_email_verification",
+        "payload":   {"contactId": contact_id},
+        "tenantId":  tenant_id,
+    })
+    result = verify.get("result") or {}
+    if not result.get("verified") and not allow_unverified:
+        return {
+            "ok": False,
+            "error": "unverified_email",
+            "reason": "Email is not verified. Approve with an explicit override to send anyway.",
+        }
+
     from_address = os.environ.get("SES_FROM_ADDRESS", f"noreply@impulsoiq.rinegansolutions.com")
     config_set   = configuration_set or os.environ.get("SES_CONFIGURATION_SET", "impulsoiq-dev")
+    html_body    = _with_canspam_footer(body)
 
     try:
         resp = _ses.send_email(
@@ -261,7 +311,7 @@ def send_email_via_ses(
             Destination={"ToAddresses": [to_email]},
             Message={
                 "Subject": {"Data": subject, "Charset": "UTF-8"},
-                "Body":    {"Html": {"Data": body, "Charset": "UTF-8"}},
+                "Body":    {"Html": {"Data": html_body, "Charset": "UTF-8"}},
             },
             ConfigurationSetName=config_set,
         )
@@ -288,6 +338,9 @@ def send_sms_via_sns(
     After sending, call write_activity to record the outbound SMS.
     Returns { ok: bool, messageId: str }
     """
+    pause = check_send_pause(tenant_id)
+    if pause.get("paused"):
+        return {"ok": False, "error": "send_paused", "reason": pause.get("reason")}
     try:
         resp = _sns.publish(
             PhoneNumber=to_phone,

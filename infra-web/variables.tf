@@ -39,6 +39,12 @@ variable "route53_zone_name" {
   default     = "impulsoiq.rinegansolutions.com"
 }
 
+variable "receive_mail" {
+  type        = bool
+  description = "Publish the MX record that routes mail for this FQDN to SES receiving. Prod only: the receipt rule set is account-wide."
+  default     = false
+}
+
 variable "tenant_subdomains" {
   type        = bool
   description = <<-EOT

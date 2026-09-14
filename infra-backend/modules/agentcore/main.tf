@@ -154,10 +154,10 @@ resource "aws_iam_role_policy" "agentcore_runtime" {
         Resource = "*"
       },
       {
-        Sid      = "InvokeCrmWriteService"
+        Sid      = "InvokeCrmServices"
         Effect   = "Allow"
         Action   = "lambda:InvokeFunction"
-        Resource = var.crm_write_service_arn
+        Resource = compact([var.crm_write_service_arn, var.crm_read_service_arn])
       },
       {
         Sid      = "StepFunctions"
@@ -170,6 +170,12 @@ resource "aws_iam_role_policy" "agentcore_runtime" {
         Effect   = "Allow"
         Action   = ["ssm:GetParameter", "ssm:GetParameters"]
         Resource = "arn:aws:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/impulsoiq/${var.env}/*"
+      },
+      {
+        Sid      = "AppSecretRead"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = var.app_secret_arn
       },
       {
         Sid      = "CloudWatchLogs"
@@ -210,6 +216,31 @@ resource "aws_iam_role_policy" "agentcore_runtime" {
         Sid      = "EcrAuthToken"
         Effect   = "Allow"
         Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Sid    = "DynamoDbAgentState"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
+          "dynamodb:Query", "dynamodb:DeleteItem",
+        ]
+        Resource = compact([
+          var.dynamodb_table != "" ? "arn:aws:dynamodb:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:table/${var.dynamodb_table}" : "",
+          var.metering_table != "" ? "arn:aws:dynamodb:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:table/${var.metering_table}" : "",
+        ])
+      },
+      {
+        Sid    = "AgentCoreMemory"
+        Effect = "Allow"
+        Action = [
+          "bedrock-agentcore:CreateEvent",
+          "bedrock-agentcore:RetrieveMemoryRecords",
+          "bedrock-agentcore:ListMemoryRecords",
+          "bedrock-agentcore:GetMemoryRecord",
+          "bedrock-agentcore:DeleteMemoryRecord",
+          "bedrock-agentcore:ListEvents",
+        ]
         Resource = "*"
       }
     ]
@@ -281,18 +312,25 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
       # reads this and sets reasoningConfig on every model call.
       BEDROCK_REASONING_EFFORT = var.reasoning_effort
 
-      ENV                   = var.env
-      CRM_WRITE_SERVICE_ARN = var.crm_write_service_arn
-      CRM_READ_SERVICE_ARN  = var.crm_read_service_arn
-      DYNAMODB_TABLE        = var.dynamodb_table
-      EVENT_BUS_ARN         = var.agents_event_bus_arn
-      AWS_REGION            = data.aws_region.current.region
-      MEMORY_STORE_ID       = aws_bedrockagentcore_memory.main.id
+      ENV                         = var.env
+      APP_SECRET_ARN              = var.app_secret_arn
+      CRM_WRITE_SERVICE_ARN       = var.crm_write_service_arn
+      CRM_READ_SERVICE_ARN        = var.crm_read_service_arn
+      DYNAMODB_TABLE              = var.dynamodb_table
+      EVENT_BUS_ARN               = var.agents_event_bus_arn
+      AWS_REGION                  = data.aws_region.current.region
+      MEMORY_STORE_ID             = aws_bedrockagentcore_memory.main.id
+      AGENT_OBSERVABILITY_ENABLED = "true"
     },
+    contains(["coordinator", "outreach", "voice", "research-enrichment", "deep-research", "forecasting-insight", "data-hygiene"], each.key) ? {
+      METERING_TABLE = var.metering_table
+    } : {},
     each.key == "voice" ? {
       CALLE_BASE_URL    = var.calle_base_url
-      CALLE_API_KEY_SSM = "/impulsoiq/${var.env}/calle/api_key"
       CALLE_WEBHOOK_URL = var.calle_webhook_url
+      ALLOW_VOICE_STUB  = var.env == "prod" ? "false" : var.allow_voice_stub
+      DNC_API_URL       = var.dnc_api_url
+      DNC_TEST_NUMBERS  = var.dnc_test_numbers
     } : {},
     each.key == "outreach" ? {
       SES_CONFIGURATION_SET = "impulsoiq-${var.env}"
@@ -300,21 +338,27 @@ resource "aws_bedrockagentcore_agent_runtime" "agent" {
       ENRICHMENT_API_URL    = var.enrichment_api_url
     } : {},
     each.key == "research-enrichment" ? {
-      ENRICHMENT_API_URL = var.enrichment_api_url
-      ENRICHMENT_API_KEY = var.enrichment_api_key
-      # v3 step 4: email verification
+      ENRICHMENT_API_URL         = var.enrichment_api_url
       EMAIL_VERIFICATION_API_URL = var.email_verification_api_url
-      EMAIL_VERIFICATION_API_KEY = var.email_verification_api_key
     } : {},
     contains(["forecasting-insight", "data-hygiene"], each.key) ? {
       REPORTING_TABLE = var.reporting_table
       METERING_TABLE  = var.metering_table
+    } : {},
+    # support-insight/tools.py writes its report to REPORTING_TABLE; without it
+    # boto3 resolves Table("") and the write fails at runtime. (Phase 9 surface.)
+    each.key == "support-insight" ? {
+      REPORTING_TABLE = var.reporting_table
     } : {},
     each.key == "ambient-interface" ? {
       STATE_MACHINE_ARN_SSM_PATH = "/impulsoiq/${var.env}/backend/state_machine_arn"
     } : {},
     each.key == "deep-research" ? {
       REPORTING_TABLE = var.reporting_table
+      # Company search. Without a provider the agent reports a gap rather than
+      # naming invented companies; the stub is impossible in prod.
+      RESEARCH_SEARCH_API_URL = var.enrichment_api_url
+      ALLOW_RESEARCH_STUB     = var.env == "prod" ? "false" : "true"
     } : {},
     each.key == "signal-listening" ? {
       # Stage 1 Nova Micro token budget (hard-coded cap, not agent-discretionary)

@@ -39,8 +39,8 @@ When placing a call:
    with type=note explaining why the call was not placed. STOP.
 3. Call check_dnc_registry. If allowed is False, call write_activity with
    type=note explaining the DNC block. STOP.
-4. Call place_call_via_calle with the task_token from the event. This
-   fires the call and stores the taskToken for webhook resumption.
+4. Call place_call_via_calle with the task_token and agent_run_id from the event.
+   The opening line MUST be the Article 50 AI disclosure as the first spoken sentence.
 5. Call write_activity to log that the call was initiated (type='call').
 6. RETURN IMMEDIATELY. Do not wait for the call result. The Step Functions
    graph will pause and resume automatically when CALL-E completes the call.

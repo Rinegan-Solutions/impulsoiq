@@ -16,20 +16,23 @@ import { z } from 'zod';
 import { operation, request } from './http';
 import {
   ContactSchema,
+  AccountSchema,
   CampaignSchema,
   AgentRunSchema,
   DealSchema,
+  ActivitySchema,
   PipelineDealSchema,
   DashboardStatsSchema,
   RegistryEntrySchema,
   KnowledgeArticleSchema,
   TemplateActivationSchema,
   OrgCheckSchema,
+  SequenceSchema,
+  EnrichmentRecordSchema,
   PaginatedSchema,
   type Contact,
   type Deal,
   type Campaign,
-  type AgentRun,
 } from './schemas';
 
 const OkSchema = z.object({ ok: z.boolean().optional(), id: z.string().optional() }).passthrough();
@@ -37,8 +40,8 @@ const OkSchema = z.object({ ok: z.boolean().optional(), id: z.string().optional(
 // ─── Contacts ─────────────────────────────────────────────────────────────────
 
 export const contactsApi = {
-  list: (page = 1, pageSize = 20, search = '') =>
-    operation('/crm-read', 'list_contacts', { page, pageSize, search },
+  list: (page = 1, pageSize = 20, search = '', stage = '') =>
+    operation('/crm-read', 'list_contacts', { page, pageSize, search, ...(stage ? { stage } : {}) },
       PaginatedSchema(ContactSchema)),
 
   get: (id: string) =>
@@ -50,6 +53,38 @@ export const contactsApi = {
 
   update: (id: string, body: Partial<Contact>) =>
     operation('/crm-write', 'upsert_contact', { id, ...body }, OkSchema),
+
+  activity: (contactId: string, page = 1, pageSize = 50) =>
+    operation('/crm-read', 'list_activities', { contactId, page, pageSize },
+      PaginatedSchema(ActivitySchema)),
+
+  enrichment: (contactId: string) =>
+    operation('/crm-read', 'list_enrichment_records', { contactId }, z.array(EnrichmentRecordSchema)),
+};
+
+export const accountsApi = {
+  list: (page = 1, pageSize = 20, search = '') =>
+    operation('/crm-read', 'list_accounts', { page, pageSize, search },
+      PaginatedSchema(AccountSchema)),
+
+  get: (id: string) =>
+    operation('/crm-read', 'get_account', { id }, AccountSchema.nullable()),
+
+  create: (body: { name: string; domain?: string; industry?: string }) =>
+    operation('/crm-write', 'upsert_account', body, OkSchema),
+
+  activity: (accountId: string, page = 1, pageSize = 40) =>
+    operation('/crm-read', 'list_activities', { accountId, page, pageSize },
+      PaginatedSchema(ActivitySchema)),
+};
+
+export const activitiesApi = {
+  list: (page = 1, pageSize = 40) =>
+    operation('/crm-read', 'list_activities', { page, pageSize },
+      PaginatedSchema(ActivitySchema)),
+
+  pendingApprovals: () =>
+    operation('/crm-read', 'list_pending_approvals', {}, z.array(ActivitySchema)),
 };
 
 // ─── Campaigns ────────────────────────────────────────────────────────────────
@@ -68,6 +103,10 @@ export const campaignsApi = {
   setStatus: (campaign: Campaign, status: 'active' | 'paused') =>
     operation('/crm-write', 'upsert_campaign',
       { ...campaign, status } as unknown as Record<string, unknown>, OkSchema),
+
+  attachSequence: (campaign: Campaign, sequenceId: string) =>
+    operation('/crm-write', 'upsert_campaign',
+      { ...campaign, config: { ...(campaign.config ?? {}), sequenceId } } as unknown as Record<string, unknown>, OkSchema),
 };
 
 // ─── Agent runs ───────────────────────────────────────────────────────────────
@@ -77,14 +116,95 @@ export const agentRunsApi = {
     operation('/crm-read', 'list_agent_runs', { page, pageSize },
       PaginatedSchema(AgentRunSchema)),
 
-  // Pause/resume/kill are status transitions on the run record. The Step
-  // Functions execution is driven separately by the backend.
-  // Full row again: agent_run.contact_id and agent_type are NOT NULL, and the
-  // proposed tuple is validated before ON CONFLICT is even considered, so a
-  // partial {id, status} fails on the constraint rather than updating.
-  setStatus: (run: AgentRun, status: 'running' | 'paused' | 'failed') =>
-    operation('/crm-write', 'upsert_agent_run',
-      { ...run, status } as unknown as Record<string, unknown>, OkSchema),
+  usage: () =>
+    operation('/crm-read', 'get_metering_usage', {},
+      z.object({
+        period: z.string().nullable(),
+        items: z.array(z.object({
+          resource: z.unknown(),
+          used: z.number(),
+          quota: z.number(),
+        })),
+        error: z.string().optional(),
+      }).passthrough()),
+
+  quality: () =>
+    operation('/crm-read', 'get_outbound_quality', {},
+      z.object({
+        consentBlocks: z.coerce.number(),
+        bounces: z.coerce.number(),
+        calls: z.coerce.number(),
+        answered: z.coerce.number(),
+        connectRate: z.number().nullable(),
+        schemaValidationPassRate: z.number().nullable(),
+        schemaFailures: z.coerce.number(),
+      }).passthrough()),
+
+  campaignUsage: () =>
+    operation('/crm-read', 'get_campaign_usage', {}, z.array(z.object({
+      id: z.string(),
+      name: z.string(),
+      runs: z.coerce.number(),
+      emails: z.coerce.number(),
+      consentBlocks: z.coerce.number().optional(),
+      bounces: z.coerce.number().optional(),
+      calls: z.coerce.number(),
+      callSeconds: z.coerce.number().optional(),
+    }).passthrough())),
+};
+
+const ControlResultSchema = z.object({
+  ok: z.boolean().optional(),
+  id: z.string().optional(),
+  stopped: z.boolean().optional(),
+  resumed: z.boolean().optional(),
+  callMayComplete: z.boolean().optional(),
+  callCancelled: z.boolean().optional(),
+  note: z.string().optional(),
+  error: z.string().optional(),
+  pausedOutbound: z.boolean().optional(),
+  reason: z.string().optional(),
+  paused: z.boolean().optional(),
+}).passthrough();
+
+/** Pause/resume/kill that StopExecution (or StartExecution on resume). */
+export const controlApi = {
+  pauseRun: (runId: string) =>
+    request('/control', ControlResultSchema, {
+      method: 'POST', body: JSON.stringify({ operation: 'pause_run', runId }),
+    }),
+  resumeRun: (runId: string) =>
+    request('/control', ControlResultSchema, {
+      method: 'POST', body: JSON.stringify({ operation: 'resume_run', runId }),
+    }),
+  killRun: (runId: string) =>
+    request('/control', ControlResultSchema, {
+      method: 'POST', body: JSON.stringify({ operation: 'kill_run', runId }),
+    }),
+  killTenant: () =>
+    request('/control', ControlResultSchema, {
+      method: 'POST', body: JSON.stringify({ operation: 'kill_tenant' }),
+    }),
+  clearTenantKill: () =>
+    request('/control', ControlResultSchema, {
+      method: 'POST', body: JSON.stringify({ operation: 'clear_tenant_kill' }),
+    }),
+  pauseStatus: () =>
+    request('/control', ControlResultSchema, {
+      method: 'POST', body: JSON.stringify({ operation: 'pause_status' }),
+    }),
+  actApproval: (body: {
+    activityId: string;
+    action: 'approve' | 'reject' | 'edit';
+    subject?: string;
+    body?: string;
+    survivorId?: string;
+    duplicateId?: string;
+    allowUnverifiedEmail?: boolean;
+  }) =>
+    request('/control', ControlResultSchema, {
+      method: 'POST', body: JSON.stringify({ operation: 'act_approval', ...body }),
+    }),
 };
 
 // ─── Deals ────────────────────────────────────────────────────────────────────
@@ -100,6 +220,9 @@ export const dealsApi = {
 
   update: (id: string, body: Partial<Deal>) =>
     operation('/crm-write', 'upsert_deal', { id, ...body }, OkSchema),
+
+  create: (body: { name: string; accountId: string; amount?: number; stage?: string; contactId?: string }) =>
+    operation('/crm-write', 'upsert_deal', body, OkSchema),
 };
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
@@ -177,6 +300,196 @@ export const supportInsightApi = {
   metrics: (periodDays = 30) =>
     operation('/crm-read', 'get_support_metrics', { periodDays },
       z.record(z.string(), z.unknown())),
+};
+
+// ─── Tenant ───────────────────────────────────────────────────────────────────
+
+const TenantSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  subdomain: z.string(),
+  tier: z.string(),
+  config: z.record(z.string(), z.unknown()).nullable().optional(),
+});
+
+export type Tenant = z.infer<typeof TenantSchema>;
+
+export const tenantApi = {
+  get: () => operation('/crm-read', 'get_tenant', {}, TenantSchema.nullable()),
+  saveBrandVoice: (brandVoiceProfile: Record<string, unknown>) =>
+    operation('/crm-write', 'patch_tenant_config', { brandVoiceProfile }, OkSchema),
+  saveSsoIntent: (body: { metadataUrl: string; provider: string }) =>
+    operation('/crm-write', 'save_sso_intent', body, OkSchema),
+  exportDsar: (contactId: string) =>
+    operation('/crm-read', 'export_dsar', { contactId }, z.unknown()),
+  exportAudit: (keys: { contactId?: string; campaignId?: string; agentRunId?: string }) =>
+    operation('/crm-read', 'export_audit', keys, z.object({
+      incomplete: z.boolean().optional(),
+      reason: z.string().optional(),
+      items: z.array(z.unknown()).optional(),
+    }).passthrough()),
+  eraseDsar: (contactId: string) =>
+    operation('/crm-write', 'erase_dsar', { contactId }, OkSchema),
+  setCsDesignPartner: (csDesignPartner: boolean) =>
+    operation('/crm-write', 'patch_expansion_config', { csDesignPartner }, OkSchema),
+};
+
+export const insightsApi = {
+  channelEfficacy: () =>
+    operation('/crm-read', 'get_channel_efficacy', {}, z.object({
+      channels: z.array(z.object({
+        type: z.string(),
+        total: z.coerce.number(),
+        agent: z.coerce.number(),
+        human: z.coerce.number(),
+      })),
+      callOutcomes: z.array(z.object({
+        outcome: z.string().nullable().optional(),
+        n: z.coerce.number(),
+      })),
+      omitted: z.array(z.string()),
+      omittedReason: z.string(),
+    })),
+  pipelineAttribution: () =>
+    operation('/crm-read', 'get_pipeline_attribution', {}, z.object({
+      agentSourced: z.coerce.number(),
+      humanOrUntouched: z.coerce.number(),
+      agentSourcedDeals: z.coerce.number(),
+      deals: z.coerce.number(),
+    })),
+  forecast: () =>
+    operation('/crm-read', 'get_forecast_report', {}, z.object({
+      available: z.boolean(),
+      reason: z.string().optional(),
+      report: z.record(z.string(), z.unknown()).optional(),
+    })),
+  personalQueue: () =>
+    operation('/crm-read', 'get_personal_queue', {}, z.object({
+      awaitingApproval: z.coerce.number(),
+      myActivities30d: z.coerce.number(),
+      runningAgents: z.coerce.number(),
+    })),
+};
+
+export const billingApi = {
+  status: () =>
+    request('/billing', z.object({
+      tier: z.string(),
+      voiceAllowed: z.boolean().optional(),
+      stripeCustomerId: z.string().nullable().optional(),
+      stripeReady: z.boolean().optional(),
+      contactCenter: z.string().optional(),
+    }).passthrough(), {
+      method: 'POST',
+      body: JSON.stringify({ operation: 'status' }),
+    }),
+  checkout: (body: { action?: 'pack'; tier?: string; interval?: 'monthly' | 'annual'; pack?: string }) =>
+    request('/billing', z.object({ url: z.string().optional(), error: z.string().optional() }).passthrough(), {
+      method: 'POST',
+      body: JSON.stringify({ operation: 'checkout', ...body }),
+    }),
+  portal: () =>
+    request('/billing', z.object({ url: z.string().optional() }).passthrough(), {
+      method: 'POST',
+      body: JSON.stringify({ operation: 'portal' }),
+    }),
+};
+
+export const sequencesApi = {
+  list: () => operation('/crm-read', 'list_sequences', {}, z.array(SequenceSchema)),
+  get: (id: string) => operation('/crm-read', 'get_sequence', { id }, SequenceSchema.nullable()),
+  save: (body: { id?: string; name: string; status?: string; steps: unknown[] }) =>
+    operation('/crm-write', 'upsert_sequence', body, OkSchema),
+};
+
+export const IntentQuestionSchema = z.object({
+  id: z.string(),
+  prompt: z.string(),
+  options: z.array(z.object({ id: z.string(), label: z.string() })),
+});
+
+export const IntentPlanSchema = z.object({
+  status: z.string(),
+  href: z.string().optional(),
+  goal: z.string().optional(),
+  starter: z.string().optional(),
+  questions: z.array(IntentQuestionSchema).optional(),
+  answers: z.record(z.string(), z.unknown()).optional(),
+  targets: z.object({
+    contactIds: z.array(z.string()),
+    label: z.string(),
+  }).optional(),
+  plan: z.object({
+    goal: z.string(),
+    goalType: z.string(),
+    channels: z.array(z.string()),
+    approvalMode: z.string(),
+    maxTouches: z.number(),
+    requiresApproval: z.boolean(),
+    steps: z.array(z.object({ agent: z.string(), action: z.string() })),
+    cost: z.object({
+      enrichmentLookups: z.number(),
+      emailSends: z.number(),
+      estimatedCallMinutes: z.number(),
+    }),
+    topology: z.string(),
+    voiceAllowed: z.boolean().optional(),
+    voicePaywall: z.boolean().optional(),
+    tier: z.string().optional(),
+  }).optional(),
+});
+
+export type IntentQuestion = z.infer<typeof IntentQuestionSchema>;
+export type IntentPlanResponse = Omit<z.infer<typeof IntentPlanSchema>, 'targets' | 'plan'> & {
+  targets: { contactIds: string[]; label: string };
+  plan: NonNullable<z.infer<typeof IntentPlanSchema>['plan']>;
+};
+
+const IntentConfirmSchema = z.object({
+  ok: z.boolean().optional(),
+  status: z.string().optional(),
+  campaignId: z.string(),
+  agentRunIds: z.array(z.string()).optional(),
+  started: z.number().optional(),
+  requiresApproval: z.boolean().optional(),
+  inspectHref: z.string().optional(),
+}).passthrough();
+
+export const intentApi = {
+  submitGoal: (body: { goal: string; starter?: string; answers?: Record<string, string> }) =>
+    request('/intent', IntentPlanSchema, {
+      method: 'POST',
+      body: JSON.stringify({ operation: 'submit_goal', ...body }),
+    }),
+  resolve: (body: { goal: string; starter?: string; answers?: Record<string, string> }) =>
+    request('/intent', IntentPlanSchema, {
+      method: 'POST',
+      body: JSON.stringify({ operation: 'resolve', ...body }),
+    }),
+  confirm: (body: { goal: string; starter?: string; answers?: Record<string, string>; contactIds?: string[] }) =>
+    request('/intent', IntentConfirmSchema, {
+      method: 'POST',
+      body: JSON.stringify({ operation: 'confirm', ...body }),
+    }),
+  deepResearch: (body: { researchGoal: string; icp?: string; approved?: boolean }) =>
+    request('/intent', z.object({
+      status: z.string().optional(),
+      estimatedTokens: z.number().optional(),
+      message: z.string().optional(),
+      ok: z.boolean().optional(),
+      id: z.string().optional(),
+      inspectHref: z.string().optional(),
+      response: z.unknown().optional(),
+      error: z.string().optional(),
+    }).passthrough(), {
+      method: 'POST',
+      body: JSON.stringify({ operation: 'deep_research', ...body }),
+    }),
+  recordEvent: (eventType: string, data: Record<string, unknown> = {}) =>
+    request('/intent', z.object({ ok: z.boolean().optional() }).passthrough(), {
+      method: 'POST',
+      body: JSON.stringify({ operation: 'record_event', eventType, data }),
+    }),
 };
 
 // ─── Org check (public — called before the user has an account) ───────────────

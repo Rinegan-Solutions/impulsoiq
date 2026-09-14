@@ -1,11 +1,8 @@
 """
-Clarification Agent — Phase 1.
+Clarification Agent — turns an ambiguous goal into a fully-specified one.
 
-Turns an ambiguous goal into a fully-specified one before the Coordinator
-builds its execution plan. Checks AgentCore Memory for settled preferences
-first — asks only what is genuinely unresolved.
-
-Output: a fully-specified goal JSON that the Coordinator consumes directly.
+Settled preferences come from AgentCore Memory. Missing Memory in production
+returns missing keys — it does not silently enable calls.
 """
 import json
 import os
@@ -15,30 +12,92 @@ from impulsoiq_model import build_model
 
 _lambda = boto3.client("lambda", region_name=os.environ.get("AWS_REGION", "eu-west-2"))
 
+# Keys that would auto-enable outbound if defaulted. Never fill these from code.
+NO_SILENT_DEFAULT = {
+    "default_outreach_channels",
+}
+
+
+def _memory_client():
+    return boto3.client("bedrock-agentcore", region_name=os.environ.get("AWS_REGION", "eu-west-2"))
+
+
+def _namespace(tenant_id: str) -> str:
+    return f"/impulsoiq/{tenant_id}/preferences"
+
 
 @tool
 def query_settled_preferences(tenant_id: str, preference_keys: list) -> dict:
     """
     Retrieve settled tenant/user preferences from AgentCore Memory.
-    Returns {preferences: {key: value}} for each key found.
+    Returns {preferences: {key: value}, missing: [keys], source: str}.
 
-    Examples of settled preferences:
-    - default_outreach_channels (["email", "call"])
-    - max_touches_per_contact (int)
-    - send_window_start_hour (int, in tenant timezone)
-    - brand_voice_profile (str)
+    If Memory is unset or empty, missing lists every requested key that would
+    change outbound behaviour. require_approval_before_send defaults to True
+    only as a conservative fallback, never as a permission to call.
     """
-    # Phase 1: Returns defaults until AgentCore Memory is wired up in Phase 2.
-    defaults: dict = {
-        "default_outreach_channels": ["email", "call"],
-        "max_touches_per_contact":   5,
-        "send_window_start_hour":    8,
-        "send_window_end_hour":      18,
-        "brand_voice_profile":       "professional, concise, consultative",
-        "require_approval_before_send": True,
-    }
-    found = {k: defaults[k] for k in preference_keys if k in defaults}
-    return {"preferences": found, "missing": [k for k in preference_keys if k not in defaults]}
+    keys = list(preference_keys or [])
+    found: dict = {}
+    missing: list = []
+    memory_id = os.environ.get("MEMORY_STORE_ID", "")
+
+    if not memory_id:
+        conservative = {"require_approval_before_send": True}
+        for k in keys:
+            if k in conservative:
+                found[k] = conservative[k]
+            else:
+                missing.append(k)
+        return {"preferences": found, "missing": missing, "source": "memory_unset"}
+
+    try:
+        client = _memory_client()
+        for key in keys:
+            resp = client.retrieve_memory_records(
+                memoryId=memory_id,
+                namespace=_namespace(tenant_id),
+                searchCriteria={"searchQuery": str(key), "topK": 3},
+            )
+            records = resp.get("memoryRecordSummaries") or resp.get("memoryRecords") or []
+            value = None
+            for rec in records:
+                content = rec.get("content") or rec.get("memoryRecord", {}).get("content") or {}
+                text = content.get("text") or content.get("value")
+                if not text:
+                    continue
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, dict) and key in parsed:
+                        value = parsed[key]
+                    elif isinstance(parsed, dict) and "value" in parsed:
+                        value = parsed["value"]
+                    else:
+                        value = parsed
+                except json.JSONDecodeError:
+                    value = text
+                break
+            if value is None:
+                missing.append(key)
+            else:
+                found[key] = value
+    except Exception as exc:
+        conservative = {"require_approval_before_send": True}
+        found = {k: conservative[k] for k in keys if k in conservative}
+        missing = [k for k in keys if k not in found]
+        return {
+            "preferences": found,
+            "missing": missing,
+            "source": "memory_error",
+            "error": str(exc),
+        }
+
+    # Never invent channel lists that include voice/email from code defaults.
+    for k in list(found):
+        if k in NO_SILENT_DEFAULT and found[k] is None:
+            del found[k]
+            missing.append(k)
+
+    return {"preferences": found, "missing": missing, "source": "agentcore_memory"}
 
 
 @tool
@@ -47,13 +106,14 @@ def get_contact_summary(tenant_id: str, contact_id: str) -> dict:
     Retrieve a contact's current stage, last activity, and enrichment summary
     from the CRM to inform clarification questions.
     """
+    crm_read = os.environ.get("CRM_READ_SERVICE_ARN") or os.environ.get("CRM_READ_ARN", "")
     resp = _lambda.invoke(
-        FunctionName   = os.environ.get("CRM_READ_ARN", ""),
+        FunctionName   = crm_read,
         InvocationType = "RequestResponse",
         Payload        = json.dumps({
             "operation": "get_contact",
+            "payload":   {"id": contact_id},
             "tenantId":  tenant_id,
-            "contactId": contact_id,
         }).encode(),
     )
     return json.loads(resp["Payload"].read()) if resp.get("Payload") else {}
@@ -68,14 +128,7 @@ def emit_specified_goal(
 ) -> dict:
     """
     Emit the fully-specified goal back to the caller.
-    This tool marks clarification as complete — call it only when all required
-    parameters are resolved (either from memory or from user answers).
-
-    The parameters dict must include:
-      - channels: list[str]          channels approved for this campaign
-      - approval_mode: str           'every_send' | 'first_n' | 'exceptions_only'
-      - max_touches: int             maximum outreach attempts per contact
-      - goal_type: str               'lead_qualification' | 'meeting_confirmation' | 'nurture'
+    Call only when all required parameters are resolved (memory or user answers).
     """
     return {
         "status":         "clarification_complete",
@@ -94,11 +147,9 @@ further questions.
 ## Process (strictly in this order)
 1. Call query_settled_preferences to retrieve what is already known.
    Ask ONLY about preferences that are NOT in memory and NOT inferable.
+   If a key is in `missing`, you MUST ask — do not invent channels or call permission.
 2. If the contact_id is provided, call get_contact_summary to understand context.
-3. Ask the minimum number of questions necessary. Use structured prompts:
-   - Binary questions get yes/no
-   - Multi-choice questions offer 2–4 options
-   - Never ask about information the system already has
+3. Ask the minimum number of questions necessary.
 4. When all parameters are resolved, call emit_specified_goal.
 
 ## Parameters you must resolve before emitting
@@ -108,20 +159,17 @@ further questions.
 - goal_type: what the campaign is trying to achieve
 
 ## What you must NOT ask about
-- Information already in query_settled_preferences response
-- The tenant's own company/product (you have the brand_voice_profile)
+- Information already in query_settled_preferences.preferences
 - Technical settings (webhook URLs, infrastructure configuration)
+
+Never assume voice/call is allowed unless it appears in settled preferences or
+the user explicitly chose it in this session.
 """.strip()
 
 MODEL = os.environ.get("CLARIFICATION_MODEL", "global.amazon.nova-2-lite-v1:0")
 
 
 def run(event: dict) -> dict:
-    """
-    Entry point.
-    Expected event: {tenantId, goal, contactId?, userId?}
-    Returns:        {status: 'clarification_complete', resolvedGoal, parameters}
-    """
     agent = Agent(
         model         = build_model(MODEL),
         system_prompt = SYSTEM_PROMPT,

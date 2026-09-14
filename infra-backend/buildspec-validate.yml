@@ -30,7 +30,7 @@ phases:
       # statically so an unsupported construct fails here instead.
       - |
         cd "$CODEBUILD_SRC_DIR"
-        python3 scripts/check-dsql-schema.py           infra-backend/modules/data/schema.sql           infra-backend/modules/data/schema-phase7.sql
+        python3 scripts/check-dsql-schema.py           infra-backend/modules/data/schema.sql           infra-backend/modules/data/schema-phase7.sql           infra-backend/modules/data/migrations.sql
       - cd "$CODEBUILD_SRC_DIR"
       # One reproducible install for every workspace, including all Lambdas.
       - npm ci --no-audit --no-fund

@@ -64,9 +64,14 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   }
 
   // Reject internal domains — no point showing sign-up nudges for gmail.com etc.
+  // Must match PUBLIC_EMAIL_DOMAINS in tenant-provisioner, which never stores
+  // these as a workspace's email_domain and so never admits anyone by them.
   const COMMON_PROVIDERS = new Set([
-    'gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com',
-    'protonmail.com','proton.me','fastmail.com','hey.com','me.com',
+    'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.co.uk', 'hotmail.com',
+    'hotmail.co.uk', 'outlook.com', 'live.com', 'msn.com', 'aol.com',
+    'icloud.com', 'me.com', 'mac.com', 'protonmail.com', 'proton.me',
+    'fastmail.com', 'hey.com', 'gmx.com', 'gmx.net', 'zoho.com', 'mail.com',
+    'yandex.com',
   ]);
   if (COMMON_PROVIDERS.has(domain)) {
     return {

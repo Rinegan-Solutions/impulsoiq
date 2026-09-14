@@ -1,3 +1,4 @@
+import { CONTACT } from '@/lib/contact';
 import { NavBar } from '@/components/layout/NavBar';
 import { Footer } from '@/components/layout/Footer';
 import { SEO } from '@/components/SEO';
@@ -60,7 +61,7 @@ export default function TermsPage() {
               To use the Service, you must register for an account. You agree to provide accurate, complete, and current information and to keep it updated. You are responsible for maintaining the confidentiality of your account credentials and for all activities that occur under your account.
             </p>
             <p>
-              You must notify us immediately at <a href="mailto:legal@impulsoiq.com" className="text-indigo-600 dark:text-indigo-400 hover:underline">legal@impulsoiq.com</a> of any unauthorised use of your account. You may not share your account with others or create accounts for the purpose of circumventing usage limits.
+              You must notify us immediately at <a href={`mailto:${CONTACT.legal}`} className="text-indigo-600 dark:text-indigo-400 hover:underline">{CONTACT.legal}</a> of any unauthorised use of your account. You may not share your account with others or create accounts for the purpose of circumventing usage limits.
             </p>
           </Section>
 
@@ -111,7 +112,7 @@ export default function TermsPage() {
               Access to paid features requires a valid subscription. All fees are quoted in USD and are exclusive of applicable taxes unless stated otherwise.
             </p>
             <p>
-              Subscriptions are billed in advance on a monthly or annual basis. Payments are processed by Stripe. By providing payment information, you authorise us to charge the applicable fees to your payment method on a recurring basis.
+              Access to paid features uses Stripe Checkout and the Stripe Customer Portal. Free includes CRM, research, drafts, and human-approved send — not voice. We do not store card numbers.
             </p>
             <p>
               If payment fails, we may suspend your account after providing notice. Overdue amounts accrue interest at 1.5% per month or the maximum permitted by law, whichever is less.
@@ -159,7 +160,7 @@ export default function TermsPage() {
               These Terms are governed by and construed in accordance with the laws of England and Wales. Any dispute arising out of or in connection with these Terms shall be subject to the exclusive jurisdiction of the courts of England and Wales.
             </p>
             <p>
-              Before initiating formal proceedings, both parties agree to attempt to resolve disputes informally by contacting <a href="mailto:legal@impulsoiq.com" className="text-indigo-600 dark:text-indigo-400 hover:underline">legal@impulsoiq.com</a>.
+              Before initiating formal proceedings, both parties agree to attempt to resolve disputes informally by contacting <a href={`mailto:${CONTACT.legal}`} className="text-indigo-600 dark:text-indigo-400 hover:underline">{CONTACT.legal}</a>.
             </p>
           </Section>
 
@@ -172,7 +173,7 @@ export default function TermsPage() {
           <Section title="14. Contact">
             <div className="bg-slate-50 dark:bg-white/[0.04] border border-slate-200 dark:border-white/[0.07] rounded-xl p-5 mt-4">
               <p className="font-semibold text-slate-900 dark:text-white mb-1">Rinegan Solutions Limited</p>
-              <p>Legal enquiries: <a href="mailto:legal@impulsoiq.com" className="text-indigo-600 dark:text-indigo-400 hover:underline">legal@impulsoiq.com</a></p>
+              <p>Legal enquiries: <a href={`mailto:${CONTACT.legal}`} className="text-indigo-600 dark:text-indigo-400 hover:underline">{CONTACT.legal}</a></p>
               <p className="mt-1 text-slate-500 dark:text-slate-500 text-[0.85rem]">Registered in England and Wales</p>
             </div>
           </Section>

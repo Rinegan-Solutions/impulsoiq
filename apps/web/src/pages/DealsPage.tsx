@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Plus, MoreHorizontal } from 'lucide-react';
-import { dealsApi } from '@/api/client';
-import type { Deal } from '@/api/schemas';
+import { accountsApi, dealsApi } from '@/api/client';
+import type { Account, Deal } from '@/api/schemas';
 import { AppShell } from '@/components/app/AppShell';
 import { SEO } from '@/components/SEO';
+import { RecordForm, Field, fieldClass } from '@/components/app/RecordForm';
 import { cn } from '@/lib/utils';
 
 const STAGES: Deal['stage'][] = [
@@ -46,13 +48,38 @@ const AVATAR_COLORS = [
 export default function DealsPage() {
   const [deals, setDeals]     = useState<Deal[]>([]);
   const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [form, setForm] = useState({ name: '', accountId: '', amount: '' });
+  const [saving, setSaving] = useState(false);
+
+  async function load() {
+    const r = await dealsApi.list();
+    setDeals(r.items);
+  }
 
   useEffect(() => {
-    dealsApi.list()
-      .then(r => setDeals(r.items))
-      .catch(() => void 0)
-      .finally(() => setLoading(false));
+    load().catch(() => void 0).finally(() => setLoading(false));
   }, []);
+
+  async function createDeal(e: FormEvent) {
+    e.preventDefault();
+    if (!form.name.trim() || !form.accountId) return;
+    setSaving(true);
+    try {
+      await dealsApi.create({
+        name: form.name.trim(),
+        accountId: form.accountId,
+        amount: Number(form.amount || 0),
+        stage: 'Prospecting',
+      });
+      setCreating(false);
+      setForm({ name: '', accountId: '', amount: '' });
+      await load();
+    } finally {
+      setSaving(false);
+    }
+  }
 
   const byStage = (stage: Deal['stage']) => deals.filter(d => d.stage === stage);
   const stageValue = (stage: Deal['stage']) => byStage(stage).reduce((s, d) => s + d.amount, 0);
@@ -73,7 +100,14 @@ export default function DealsPage() {
               <span className="text-emerald-600 dark:text-emerald-400 font-semibold">${(totalWon/1000).toFixed(0)}K</span> closed won
             </p>
           </div>
-          <button className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:shadow-lg hover:shadow-indigo-500/25 hover:-translate-y-0.5 transition-all">
+          <button
+            type="button"
+            onClick={() => {
+              setCreating(true);
+              void accountsApi.list(1, 50).then((r) => setAccounts(r.items)).catch(() => setAccounts([]));
+            }}
+            className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:shadow-lg hover:shadow-indigo-500/25 hover:-translate-y-0.5 transition-all"
+          >
             <Plus size={15} /> Add deal
           </button>
         </div>
@@ -81,6 +115,11 @@ export default function DealsPage() {
         {/* Kanban board */}
         {loading ? (
           <div className="flex-1 flex items-center justify-center text-[0.84rem] text-slate-400 dark:text-slate-600">Loading pipeline…</div>
+        ) : deals.length === 0 ? (
+          <div className="flex-1 flex flex-col items-center justify-center text-[0.84rem] text-slate-400">
+            No deals yet.
+            <Link to="/home?intent=compose&starter=quiet_deals" className="mt-2 text-indigo-600 font-semibold">Chase quiet deals from Home</Link>
+          </div>
         ) : (
           <div className="flex gap-3 overflow-x-auto pb-4 flex-1 scrollbar-hide">
             {STAGES.map(stage => {
@@ -144,6 +183,18 @@ export default function DealsPage() {
           </div>
         )}
       </div>
+      {creating && (
+        <RecordForm title="New deal" onClose={() => setCreating(false)} onSubmit={(e) => void createDeal(e)} busy={saving}>
+          <Field label="Name"><input required className={fieldClass} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+          <Field label="Company">
+            <select required className={fieldClass} value={form.accountId} onChange={(e) => setForm({ ...form, accountId: e.target.value })}>
+              <option value="">Select company</option>
+              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Amount"><input type="number" min="0" className={fieldClass} value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} /></Field>
+        </RecordForm>
+      )}
     </AppShell>
   );
 }

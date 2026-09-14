@@ -1,2 +1,9 @@
 aws_region = "us-east-1"
 env        = "dev"
+
+# Stripe Price IDs from the Dashboard (not secrets). Empty = checkout fails closed.
+# Third-party secrets live in Secrets Manager JSON impulsoiq/<env>/app:
+#   stripe_secret_key, stripe_webhook_secret, calle_api_key,
+#   dnc_api_key, enrichment_api_key, email_verification_api_key
+# stripe_price_starter_monthly = ""
+# stripe_price_growth_monthly  = ""

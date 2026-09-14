@@ -192,7 +192,23 @@ resource "aws_cloudfront_distribution" "web" {
     }
   }
 
-  # SPA — serve index.html for all 404s
+  # SPA fallback: serve the app shell for any path with no object behind it.
+  #
+  # S3 answers a missing key with 403 AccessDenied, NOT 404, whenever the caller
+  # lacks s3:ListBucket -- and the OAC principal deliberately does not have it.
+  # With only 404 mapped, every client-side route (/sign-in, /sign-up, /verify,
+  # /dashboard, ...) returned S3's XML error on a direct visit, a refresh, or
+  # any plain <a href> navigation, which is how "landing page -> Sign in" broke.
+  #
+  # Mapping 403 here is safe because this distribution fronts ONLY the static
+  # bundle. The SPA calls API Gateway on its execute-api host directly, so no
+  # API authorisation failure can ever be masked as a 200 by this rule.
+  custom_error_response {
+    error_code         = 403
+    response_code      = 200
+    response_page_path = "/index.html"
+  }
+
   custom_error_response {
     error_code         = 404
     response_code      = 200
@@ -235,6 +251,19 @@ resource "aws_route53_record" "web" {
 # IPv6. CloudFront answers on both stacks, and a browser on an IPv6-only
 # network gets no answer at all without a AAAA record -- it does not fall back
 # to the A record.
+# Inbound mail for the contact addresses, received by SES in this region (the
+# receipt rules live in infra-backend's prod-only mail module). Only the stack
+# that owns the zone apex publishes it, so dev and test never contend for it.
+resource "aws_route53_record" "inbound_mx" {
+  count = var.receive_mail ? 1 : 0
+
+  zone_id = data.aws_route53_zone.main.zone_id
+  name    = local.fqdn
+  type    = "MX"
+  ttl     = 300
+  records = ["10 inbound-smtp.${var.aws_region}.amazonaws.com"]
+}
+
 resource "aws_route53_record" "web_v6" {
   for_each = toset(local.all_fqdns)
 

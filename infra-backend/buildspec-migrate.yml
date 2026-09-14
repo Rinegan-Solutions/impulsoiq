@@ -79,7 +79,10 @@ phases:
         # ON_ERROR_STOP makes psql exit non-zero on the first failed statement.
         # Without it psql reports success after printing errors, and a broken
         # migration would deploy silently.
-        for f in schema.sql schema-phase7.sql; do
+        # migrations.sql is DML and runs LAST: the free-tier backfill needs the
+        # widened tier CHECK from schema.sql to already be in place. It is
+        # guarded by the schema_migration ledger, so re-running is a no-op.
+        for f in schema.sql schema-phase7.sql migrations.sql; do
           [ -f "$f" ] || { echo "missing $f"; exit 1; }
           echo "── applying $f ──"
           psql "host=${DSQL_ENDPOINT} port=5432 dbname=postgres user=admin sslmode=require" \
@@ -154,6 +157,19 @@ phases:
           exit 1
         fi
         echo "registry seeded"
+
+      - |
+        set -euo pipefail
+        echo "── reconciling workspace membership ──"
+        # PostConfirmation never blocks a confirmation, so an account confirmed
+        # while the backend was broken is left without a workspace group, and
+        # every API refuses it. This runs after the schema is applied and after
+        # apply shipped the current provisioner, and replays provisioning for
+        # exactly those accounts. Accounts with a group are untouched, so it is
+        # a no-op on a healthy environment. It fails the build if any account
+        # still cannot be provisioned, rather than deploying green over a
+        # customer who cannot use the product.
+        bash "$CODEBUILD_SRC_DIR/scripts/reconcile-tenant-membership.sh" "$ENV"
 
   post_build:
     commands:

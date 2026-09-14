@@ -79,3 +79,9 @@ export function currentTenantSlug(host: string = window.location.hostname): stri
 
   return isValidSlug(label) ? label : '';
 }
+
+/** A workspace's own host, e.g. "acme" -> "acme.impulsoiq.rinegansolutions.com". */
+export function workspaceHost(slug: string): string {
+  // The build always injects VITE_WEB_ZONE; the fallback matches SignUp's.
+  return `${slug}.${ZONE || 'impulsoiq.rinegansolutions.com'}`;
+}

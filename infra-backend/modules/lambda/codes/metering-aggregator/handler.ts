@@ -122,7 +122,11 @@ export const handler: DynamoDBStreamHandler = async (event) => {
       }
     }
 
-    // ── contact enrichment written (enrichment API lookup) ──────────────────
+    if (entityType === 'enrichment_record' && eventType === 'created') {
+      await increment(tenantId, period, 'enrichment_lookups', 1);
+    }
+
+    // ── contact enrichment written (legacy memory path) ─────────────────────
     if (entityType === 'memory' && (data as Record<string, unknown>)?.['memory_type'] === 'enrichment_summary') {
       await increment(tenantId, period, 'enrichment_lookups', 1);
     }

@@ -16,7 +16,7 @@ import json
 import os
 import httpx
 import boto3
-from strands import tool
+from impulsoiq_secrets import app_secret
 
 _lambda = boto3.client("lambda", region_name=os.environ.get("AWS_REGION", "eu-west-2"))
 
@@ -85,43 +85,10 @@ def get_brand_voice_profile(tenant_id: str) -> dict:
 @tool
 def enrich_from_api(contact_email: str, contact_domain: str) -> dict:
     """
-    Call the external contact enrichment API to fetch firmographic and
-    technographic data for the contact's company.
-
-    Stub for hackathon MVP — logs the call and returns a placeholder response.
-    Phase 3: integrate with Apollo.io / Clearbit / PDL.
-
-    Returns { company_name, industry, employee_count, tech_stack[], revenue_band,
-              linkedin_url, seniority, job_function } or {} on failure.
+    Single-provider lookup. Prefer run_enrichment_waterfall, which caps paid
+    calls and never invents firmographics.
     """
-    enrichment_api_url = os.environ.get("ENRICHMENT_API_URL", "")
-    enrichment_api_key = os.environ.get("ENRICHMENT_API_KEY", "")
-
-    if not enrichment_api_url or not enrichment_api_key:
-        # Stub for hackathon
-        return {
-            "company_name":    contact_domain.split(".")[0].title(),
-            "industry":        "Technology",
-            "employee_count":  50,
-            "revenue_band":    "1M-10M",
-            "tech_stack":      ["Salesforce", "HubSpot"],
-            "seniority":       "Manager",
-            "job_function":    "Sales",
-            "source":          "stub",
-        }
-
-    try:
-        resp = httpx.post(
-            enrichment_api_url,
-            headers={"Authorization": f"Bearer {enrichment_api_key}", "Content-Type": "application/json"},
-            json={"email": contact_email, "domain": contact_domain},
-            timeout=10.0,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as exc:
-        # Non-fatal — enrichment failure should not block the campaign
-        return {"error": str(exc), "source": "api_failed"}
+    return _provider_call("A", contact_email, contact_domain)
 
 
 @tool
@@ -302,7 +269,7 @@ def map_executives(company_name: str, company_domain: str, target_titles: list, 
                 "domain":       company_domain,
                 "targetTitles": target_titles,
             },
-            headers={"X-API-Key": os.environ.get("ENRICHMENT_API_KEY", "")},
+            headers={"X-API-Key": os.environ.get("ENRICHMENT_API_KEY", "") or app_secret("enrichment_api_key")},
             timeout=10,
         )
         if resp.status_code == 200:
@@ -331,7 +298,7 @@ def verify_email(email_address: str, company_domain: str) -> dict:
         confidence: 0.0-1.0, deliverable: bool }
     """
     verification_api_url = os.environ.get("EMAIL_VERIFICATION_API_URL", "")
-    verification_api_key = os.environ.get("EMAIL_VERIFICATION_API_KEY", "")
+    verification_api_key = os.environ.get("EMAIL_VERIFICATION_API_KEY", "") or app_secret("email_verification_api_key")
 
     if not verification_api_url:
         # Stub: return unknown if API not configured (won't block enrichment)
@@ -355,3 +322,246 @@ def verify_email(email_address: str, company_domain: str) -> dict:
         pass
 
     return {"status": "unknown", "confidence": 0.0, "deliverable": False}
+
+
+def _providers() -> list[tuple[str, str, str]]:
+    """(id, url, key) for A then B then C. A aliases the legacy ENRICHMENT_API_* vars."""
+    specs = [
+        ("A", os.environ.get("ENRICHMENT_PROVIDER_A_URL") or os.environ.get("ENRICHMENT_API_URL", ""),
+              os.environ.get("ENRICHMENT_PROVIDER_A_KEY") or os.environ.get("ENRICHMENT_API_KEY", "") or app_secret("enrichment_api_key")),
+        ("B", os.environ.get("ENRICHMENT_PROVIDER_B_URL", ""), os.environ.get("ENRICHMENT_PROVIDER_B_KEY", "") or app_secret("enrichment_provider_b_key")),
+        ("C", os.environ.get("ENRICHMENT_PROVIDER_C_URL", ""), os.environ.get("ENRICHMENT_PROVIDER_C_KEY", "") or app_secret("enrichment_provider_c_key")),
+    ]
+    return [(i, u, k) for i, u, k in specs if u]
+
+
+def _provider_call(provider_id: str, email: str, domain: str) -> dict:
+    for pid, url, key in _providers():
+        if pid != provider_id:
+            continue
+        try:
+            resp = httpx.post(
+                url,
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"email": email, "domain": domain},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            data = resp.json() if resp.content else {}
+            if not isinstance(data, dict):
+                return {"error": "non_object_response", "source": pid}
+            data["source"] = pid
+            return data
+        except Exception as exc:
+            return {"error": str(exc), "source": pid}
+    return {"error": "provider_not_configured", "source": provider_id}
+
+
+def _decayed(fetched_at: str | None, policy: str) -> bool:
+    if not fetched_at:
+        return True
+    days = 90
+    if policy.endswith("d"):
+        try:
+            days = int(policy[:-1])
+        except ValueError:
+            days = 90
+    from datetime import datetime, timezone
+    try:
+        fetched = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    now = datetime.now(timezone.utc)
+    return (now - fetched).days > days
+
+
+def _row_verified_email(row: dict) -> bool:
+    if not row:
+        return False
+    try:
+        conf = float(row.get("confidence") or 0)
+    except (TypeError, ValueError):
+        return False
+    if conf < 0.8:
+        return False
+    meta = row.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    status = str(meta.get("status") or meta.get("verificationStatus") or "")
+    if row.get("field") == "email_verified":
+        return not _decayed(row.get("fetched_at") or row.get("fetchedAt"), row.get("decay_policy") or row.get("decayPolicy") or "30d")
+    if status not in ("verified", "valid", "deliverable"):
+        return False
+    return not _decayed(row.get("fetched_at") or row.get("fetchedAt"), row.get("decay_policy") or row.get("decayPolicy") or "30d")
+
+
+def _fields_from_provider(data: dict) -> list[tuple[str, str, float]]:
+    """Only copy keys the provider actually returned. Never invent industry/headcount."""
+    mapping = {
+        "industry": "industry",
+        "employee_count": "employee_count",
+        "employeeCount": "employee_count",
+        "company_name": "company_name",
+        "companyName": "company_name",
+        "revenue_band": "revenue_band",
+        "revenueBand": "revenue_band",
+        "seniority": "seniority",
+        "job_function": "job_function",
+        "email": "email",
+        "title": "title",
+    }
+    out: list[tuple[str, str, float]] = []
+    conf = float(data.get("confidence") or 0.6)
+    if data.get("error"):
+        return out
+    for src, field in mapping.items():
+        if data.get(src) in (None, "", []):
+            continue
+        out.append((field, str(data[src]), conf))
+    tech = data.get("tech_stack") or data.get("techStack")
+    if isinstance(tech, list) and tech:
+        out.append(("tech_stack", ",".join(str(t) for t in tech), conf))
+    return out
+
+
+@tool
+def run_enrichment_waterfall(tenant_id: str, contact_id: str) -> dict:
+    """
+    Deterministic waterfall: internal history → providers A/B/C → email verify.
+    Stops at the first high-confidence verified email. Cap: four paid HTTP calls.
+    Production without providers returns a human-visible gap — never placeholders.
+    """
+    return execute_waterfall(tenant_id, contact_id)
+
+
+def execute_waterfall(tenant_id: str, contact_id: str) -> dict:
+    crm_read = os.environ["CRM_READ_SERVICE_ARN"]
+    crm_write = os.environ["CRM_WRITE_SERVICE_ARN"]
+    contact_wrap = _invoke_lambda(crm_read, {
+        "operation": "get_contact",
+        "payload": {"id": contact_id},
+        "tenantId": tenant_id,
+    })
+    contact = contact_wrap.get("result") or {}
+    if not contact:
+        return {"ok": False, "gap": "contact_not_found", "paidCalls": 0}
+
+    hist = _invoke_lambda(crm_read, {
+        "operation": "list_enrichment_records",
+        "payload": {"contactId": contact_id},
+        "tenantId": tenant_id,
+    })
+    existing = hist.get("result") or []
+    if not isinstance(existing, list):
+        existing = []
+
+    for row in existing:
+        if _row_verified_email(row if isinstance(row, dict) else {}):
+            return {
+                "ok": True,
+                "gap": None,
+                "verifiedEmail": True,
+                "paidCalls": 0,
+                "source": "internal_history",
+                "contactId": contact_id,
+            }
+
+    providers = _providers()
+    verify_url = os.environ.get("EMAIL_VERIFICATION_API_URL", "")
+    if not providers and not verify_url:
+        return {
+            "ok": False,
+            "gap": "no_enrichment_providers",
+            "message": "No enrichment or email-verification providers are configured. Outbound will not invent industry or headcount.",
+            "paidCalls": 0,
+            "contactId": contact_id,
+        }
+
+    paid = 0
+    records: list[dict] = []
+    email_candidate = (contact.get("email") or "").strip()
+    domain = (contact.get("email") or "").split("@")[-1] if contact.get("email") else ""
+    verified = False
+
+    for pid, url, key in providers:
+        if paid >= 4:
+            break
+        paid += 1
+        data = _provider_call(pid, email_candidate, domain)
+        for field, value, conf in _fields_from_provider(data):
+            records.append({
+                "contactId": contact_id,
+                "source": f"provider_{pid}",
+                "field": field,
+                "value": value,
+                "confidence": conf,
+                "decayPolicy": "30d" if field in ("email", "email_verified") else "90d",
+                "metadata": {},
+            })
+            if field == "email" and value:
+                email_candidate = value
+        if any(r["field"] == "email" and float(r["confidence"]) >= 0.8 for r in records):
+            break
+
+    if email_candidate and verify_url and paid < 4:
+        paid += 1
+        vr = verify_email(email_candidate, domain)
+        deliverable = bool(vr.get("deliverable"))
+        conf = float(vr.get("confidence") or 0)
+        verified = deliverable and conf >= 0.7
+        records.append({
+            "contactId": contact_id,
+            "source": "email_verify",
+            "field": "email_verified" if verified else "email",
+            "value": email_candidate,
+            "confidence": conf if verified else min(conf, 0.49),
+            "decayPolicy": "30d",
+            "metadata": {"status": vr.get("status"), "paid": True},
+        })
+    elif email_candidate and not verify_url:
+        records.append({
+            "contactId": contact_id,
+            "source": "unverified",
+            "field": "email",
+            "value": email_candidate,
+            "confidence": 0.2,
+            "decayPolicy": "30d",
+            "metadata": {"status": "unverified", "reason": "verification_api_not_configured"},
+        })
+
+    if records:
+        _invoke_lambda(crm_write, {
+            "operation": "insert_enrichment_records",
+            "payload": {"contactId": contact_id, "records": records},
+            "tenantId": tenant_id,
+            "actorType": "agent",
+            "actorId": "research-enrichment-agent",
+        })
+
+    summary = {r["field"]: r["value"] for r in records}
+    if summary:
+        _invoke_lambda(crm_write, {
+            "operation": "upsert_contact",
+            "payload": {
+                "id": contact_id,
+                "enrichmentJson": {
+                    **summary,
+                    "email_confidence": "high" if verified else "low",
+                    "verifiedEmail": verified,
+                    "waterfallPaidCalls": paid,
+                },
+            },
+            "tenantId": tenant_id,
+            "actorType": "agent",
+            "actorId": "research-enrichment-agent",
+        })
+
+    return {
+        "ok": bool(verified or summary),
+        "gap": None if (verified or summary) else "no_attributed_fields",
+        "verifiedEmail": verified,
+        "paidCalls": paid,
+        "contactId": contact_id,
+        "fields": list(summary.keys()),
+        "message": None if (verified or summary) else "Providers returned no attributed fields.",
+    }

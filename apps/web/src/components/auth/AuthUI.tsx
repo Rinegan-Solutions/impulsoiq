@@ -1,4 +1,5 @@
 import { forwardRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Eye, EyeOff, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -9,10 +10,9 @@ interface BrandPanelProps {
   heading: string;
   sub: string;
   bullets: string[];
-  quote?: { text: string; author: string; role: string };
 }
 
-export function BrandPanel({ heading, sub, bullets, quote }: BrandPanelProps) {
+export function BrandPanel({ heading, sub, bullets }: BrandPanelProps) {
   return (
     <div className="hidden lg:flex flex-col justify-between bg-gradient-to-br from-indigo-600 via-violet-600 to-indigo-700 p-12 relative overflow-hidden select-none">
       {/* Decorative orbs */}
@@ -20,10 +20,10 @@ export function BrandPanel({ heading, sub, bullets, quote }: BrandPanelProps) {
       <div className="absolute -bottom-20 -left-16 w-64 h-64 rounded-full bg-violet-900/30 blur-3xl pointer-events-none" />
 
       {/* Logo */}
-      <a href="/" className="flex items-center gap-2.5 z-10">
+      <Link to="/" className="flex items-center gap-2.5 z-10">
         <img src="/android-chrome-192x192.png" alt="" className="w-8 h-8 rounded-xl object-cover" />
         <span className="font-extrabold text-[1.2rem] text-white tracking-tight">ImpulsoIQ</span>
-      </a>
+      </Link>
 
       {/* Main copy */}
       <div className="z-10">
@@ -39,16 +39,8 @@ export function BrandPanel({ heading, sub, bullets, quote }: BrandPanelProps) {
         </ul>
       </div>
 
-      {/* Testimonial */}
-      {quote && (
-        <div className="z-10 bg-white/10 backdrop-blur-sm rounded-2xl p-5 border border-white/20">
-          <p className="text-white/90 text-[0.84rem] leading-relaxed italic mb-3">"{quote.text}"</p>
-          <div>
-            <p className="text-white font-semibold text-[0.8rem]">{quote.author}</p>
-            <p className="text-indigo-300 text-[0.74rem]">{quote.role}</p>
-          </div>
-        </div>
-      )}
+      {/* Balances the logo so the copy stays vertically centred. */}
+      <div aria-hidden="true" />
     </div>
   );
 }
@@ -72,12 +64,12 @@ export function SplitLayout({ children, panel }: SplitLayoutProps) {
           transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
         >
           {/* Mobile-only logo */}
-          <a href="/" className="flex items-center gap-2.5 mb-8 lg:hidden">
+          <Link to="/" className="flex items-center gap-2.5 mb-8 lg:hidden">
             <img src="/android-chrome-192x192.png" alt="" className="w-7 h-7 rounded-lg object-cover" />
             <span className="font-extrabold text-[1.1rem] tracking-tight bg-gradient-to-r from-indigo-600 via-violet-600 to-indigo-500 bg-clip-text text-transparent">
               ImpulsoIQ
             </span>
-          </a>
+          </Link>
           {children}
         </motion.div>
       </div>
@@ -100,12 +92,12 @@ export function CardLayout({ children }: CardLayoutProps) {
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
       >
-        <a href="/" className="flex items-center justify-center gap-2.5 mb-8">
+        <Link to="/" className="flex items-center justify-center gap-2.5 mb-8">
           <img src="/android-chrome-192x192.png" alt="" className="w-8 h-8 rounded-xl object-cover" />
           <span className="font-extrabold text-[1.2rem] tracking-tight bg-gradient-to-r from-indigo-600 via-violet-600 to-indigo-500 bg-clip-text text-transparent">
             ImpulsoIQ
           </span>
-        </a>
+        </Link>
         <div className="bg-white dark:bg-[#0d1526] border border-slate-200 dark:border-white/[0.07] rounded-3xl shadow-xl shadow-slate-900/5 dark:shadow-black/40 p-8">
           {children}
         </div>
@@ -205,6 +197,18 @@ export function ErrorBanner({ message }: { message: string }) {
   return (
     <div className="flex items-start gap-2.5 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/25 text-red-700 dark:text-red-400 rounded-xl px-4 py-3 text-[0.84rem]">
       <span className="mt-px flex-shrink-0">⚠</span>
+      <span>{message}</span>
+    </div>
+  );
+}
+
+// ─── Success / info banner ───────────────────────────────────────────────────
+
+export function NoticeBanner({ message }: { message: string }) {
+  if (!message) return null;
+  return (
+    <div role="status" className="flex items-start gap-2.5 bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/25 text-emerald-700 dark:text-emerald-400 rounded-xl px-4 py-3 text-[0.84rem]">
+      <span className="mt-px flex-shrink-0">✓</span>
       <span>{message}</span>
     </div>
   );

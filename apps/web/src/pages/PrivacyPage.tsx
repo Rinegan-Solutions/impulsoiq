@@ -1,3 +1,4 @@
+import { CONTACT } from '@/lib/contact';
 import { NavBar } from '@/components/layout/NavBar';
 import { Footer } from '@/components/layout/Footer';
 import { SEO } from '@/components/SEO';
@@ -102,7 +103,7 @@ export default function PrivacyPage() {
               <li><strong className="text-slate-800 dark:text-slate-200">Right to withdraw consent:</strong> Where processing is based on consent, you may withdraw it at any time.</li>
             </ul>
             <p>
-              To exercise any of these rights, please email <a href="mailto:privacy@impulsoiq.com" className="text-indigo-600 dark:text-indigo-400 hover:underline">privacy@impulsoiq.com</a>. We will respond within 30 days.
+            To exercise these rights for contacts in your workspace, an admin can export or erase a contact from Settings → Privacy (includes consent records and call metadata). You may also email <a href={`mailto:${CONTACT.privacy}`} className="text-indigo-600 dark:text-indigo-400 hover:underline">{CONTACT.privacy}</a>. We will respond within 30 days.
             </p>
           </Section>
 
@@ -148,7 +149,7 @@ export default function PrivacyPage() {
             </p>
             <div className="bg-slate-50 dark:bg-white/[0.04] border border-slate-200 dark:border-white/[0.07] rounded-xl p-5 mt-4 not-prose">
               <p className="font-semibold text-slate-900 dark:text-white mb-1">Rinegan Solutions Limited</p>
-              <p>Email: <a href="mailto:privacy@impulsoiq.com" className="text-indigo-600 dark:text-indigo-400 hover:underline">privacy@impulsoiq.com</a></p>
+              <p>Email: <a href={`mailto:${CONTACT.privacy}`} className="text-indigo-600 dark:text-indigo-400 hover:underline">{CONTACT.privacy}</a></p>
               <p className="mt-1 text-slate-500 dark:text-slate-500 text-[0.85rem]">Registered in England and Wales</p>
             </div>
           </Section>

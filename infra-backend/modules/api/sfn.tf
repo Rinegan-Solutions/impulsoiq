@@ -56,6 +56,8 @@ resource "aws_sfn_state_machine" "campaign" {
               "campaignId.$" : "$.campaignId"
               "agentType" : "coordinator"
               "status" : "running"
+              "stepFunctionsExecutionArn.$" : "$$.Execution.Id"
+              "input.$" : "$"
             }
           }
         }
@@ -83,7 +85,222 @@ resource "aws_sfn_state_machine" "campaign" {
         }
         ResultPath = "$.enrichmentResult"
         Retry      = local.sfn_retry
-        Next       = "CheckEmailConsent"
+        Next       = "EnrichGapGate"
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          Next        = "HandleError"
+          ResultPath  = "$.error"
+        }]
+      }
+
+      EnrichGapGate = {
+        Type = "Choice"
+        Choices = [
+          {
+            Variable      = "$.enrichmentResult.Payload.ok"
+            BooleanEquals = false
+            Next          = "HandleEnrichmentGap"
+          },
+          {
+            Variable      = "$.enrichmentResult.ok"
+            BooleanEquals = false
+            Next          = "HandleEnrichmentGap"
+          }
+        ]
+        Default = "AdvanceSequence"
+      }
+
+      HandleEnrichmentGap = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = var.crm_write_service_arn
+          Payload = {
+            "operation" : "upsert_activity"
+            "tenantId.$" : "$.tenantId"
+            "actorType" : "agent"
+            "actorId" : "sfn-campaign"
+            "payload" = {
+              "contactId.$" : "$.contactId"
+              "agentRunId.$" : "$.agentRunId"
+              "type" : "note"
+              "actorType" : "agent"
+              "actorId" : "sfn-campaign"
+              "subject" : "Enrichment gap"
+              "body" : "Enrichment did not write attributed sources. No placeholder firmographics were invented."
+              "metadata" = {
+                "kind" : "enrichment_gap"
+                "enrichment.$" : "$.enrichmentResult"
+              }
+            }
+          }
+        }
+        ResultPath = "$.enrichmentGapActivity"
+        Next       = "EnrichmentFailed"
+      }
+
+      EnrichmentFailed = {
+        Type       = "Pass"
+        Result     = { error = "enrichment_gap", cause = "No attributed enrichment sources" }
+        ResultPath = "$.error"
+        Next       = "HandleError"
+      }
+
+      AdvanceSequence = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = var.sequence_step_arn
+          Payload = {
+            "steps.$" : "$.sequence.steps"
+            "stepIndex.$" : "$.currentStep.stepIndex"
+          }
+        }
+        ResultSelector = {
+          "done.$" : "$.Payload.done"
+          "type.$" : "$.Payload.type"
+          "waitSeconds.$" : "$.Payload.waitSeconds"
+          "stepIndex.$" : "$.Payload.stepIndex"
+          "subject.$" : "$.Payload.subject"
+          "body.$" : "$.Payload.body"
+          "title.$" : "$.Payload.title"
+        }
+        ResultPath = "$.currentStep"
+        Retry      = local.sfn_retry
+        Next       = "SequenceChoice"
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          Next        = "HandleError"
+          ResultPath  = "$.error"
+        }]
+      }
+
+      SequenceChoice = {
+        Type = "Choice"
+        Choices = [
+          {
+            Variable      = "$.currentStep.done"
+            BooleanEquals = true
+            Next          = "LogCompletion"
+          },
+          {
+            Variable     = "$.currentStep.type"
+            StringEquals = "wait"
+            Next         = "WaitStep"
+          },
+          {
+            Variable     = "$.currentStep.type"
+            StringEquals = "email"
+            Next         = "CheckEmailConsent"
+          },
+          {
+            Variable     = "$.currentStep.type"
+            StringEquals = "sms"
+            Next         = "CheckSmsConsent"
+          },
+          {
+            Variable     = "$.currentStep.type"
+            StringEquals = "call"
+            Next         = "VoiceEntitlementGate"
+          },
+          {
+            Variable     = "$.currentStep.type"
+            StringEquals = "task"
+            Next         = "WriteSequenceTask"
+          }
+        ]
+        Default = "AdvanceSequence"
+      }
+
+      WaitStep = {
+        Type        = "Wait"
+        SecondsPath = "$.currentStep.waitSeconds"
+        Next        = "AdvanceSequence"
+      }
+
+      WriteSequenceTask = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = var.crm_write_service_arn
+          Payload = {
+            "operation" : "upsert_activity"
+            "tenantId.$" : "$.tenantId"
+            "actorType" : "agent"
+            "actorId" : "sfn-campaign"
+            "payload" = {
+              "contactId.$" : "$.contactId"
+              "agentRunId.$" : "$.agentRunId"
+              "type" : "task"
+              "actorType" : "agent"
+              "actorId" : "sfn-campaign"
+              "subject.$" : "$.currentStep.title"
+              "body.$" : "$.currentStep.body"
+              "metadata" = { "kind" : "sequence_task" }
+            }
+          }
+        }
+        ResultPath = "$.sequenceTaskResult"
+        Retry      = local.sfn_retry
+        Next       = "AdvanceSequence"
+      }
+
+      CheckSmsConsent = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = var.crm_write_service_arn
+          Payload = {
+            "operation" : "check_consent"
+            "tenantId.$" : "$.tenantId"
+            "actorType" : "agent"
+            "actorId" : "sfn-campaign"
+            "payload" = {
+              "contactId.$" : "$.contactId"
+              "channel" : "sms"
+            }
+          }
+        }
+        ResultSelector = {
+          "hasConsent.$" : "$.Payload.result.hasConsent"
+        }
+        ResultPath = "$.smsConsent"
+        Retry      = local.sfn_retry
+        Next       = "SmsConsentGate"
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          Next        = "HandleError"
+          ResultPath  = "$.error"
+        }]
+      }
+
+      SmsConsentGate = {
+        Type = "Choice"
+        Choices = [{
+          Variable      = "$.smsConsent.hasConsent"
+          BooleanEquals = true
+          Next          = "SendSms"
+        }]
+        Default = "LogSmsConsentBlock"
+      }
+
+      SendSms = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = var.outreach_agent_arn
+          Payload = {
+            "tenantId.$" : "$.tenantId"
+            "contactId.$" : "$.contactId"
+            "campaignId.$" : "$.campaignId"
+            "channel" : "sms"
+            "hasConsent" : true
+            "approvalMode" : "auto_send"
+          }
+        }
+        ResultPath = "$.sendSmsResult"
+        Retry      = local.sfn_retry
+        Next       = "AdvanceSequence"
         Catch = [{
           ErrorEquals = ["States.ALL"]
           Next        = "HandleError"
@@ -129,7 +346,7 @@ resource "aws_sfn_state_machine" "campaign" {
           BooleanEquals = true
           Next          = "DraftEmail"
         }]
-        Default = "CheckCallConsent"
+        Default = "LogEmailConsentBlock"
       }
 
       # ── 5. Draft email ─────────────────────────────────────────────────────
@@ -165,7 +382,14 @@ resource "aws_sfn_state_machine" "campaign" {
           BooleanEquals = true
           Next          = "WaitForEmailApproval"
         }]
-        Default = "SendEmail"
+        Default = "SkipEmailApproval"
+      }
+
+      SkipEmailApproval = {
+        Type       = "Pass"
+        Result     = { approved = true, auto = true }
+        ResultPath = "$.approvalResult"
+        Next       = "SendEmail"
       }
 
       # ── 7. Wait for email approval (human in the loop) ────────────────────
@@ -184,10 +408,13 @@ resource "aws_sfn_state_machine" "campaign" {
               "type" : "email"
               "actorType" : "agent"
               "actorId" : "sfn-campaign"
-              "body" : "Email draft awaiting human approval"
+              "subject" : "Email draft awaiting approval"
+              "body" : "Review the draft in Approvals. The graph waits on this task token."
               "metadata" = {
                 "status" : "awaiting_approval"
+                "kind" : "email_send"
                 "taskToken.$" : "$$.Task.Token"
+                "draft.$" : "$.draftEmailResult"
               }
             }
           }
@@ -221,11 +448,12 @@ resource "aws_sfn_state_machine" "campaign" {
             "channel" : "email"
             "hasConsent" : true
             "approvalMode" : "auto_send"
+            "approval.$" : "$.approvalResult"
           }
         }
         ResultPath = "$.sendEmailResult"
         Retry      = local.sfn_retry
-        Next       = "WaitForEngagement"
+        Next       = "AdvanceSequence"
         Catch = [{
           ErrorEquals = ["States.ALL"]
           Next        = "HandleError"
@@ -233,11 +461,126 @@ resource "aws_sfn_state_machine" "campaign" {
         }]
       }
 
-      # ── 9. Wait for engagement (48h) ───────────────────────────────────────
-      WaitForEngagement = {
-        Type    = "Wait"
-        Seconds = 172800
-        Next    = "CheckCallConsent"
+      LogEmailConsentBlock = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = var.crm_write_service_arn
+          Payload = {
+            "operation" : "upsert_activity"
+            "tenantId.$" : "$.tenantId"
+            "actorType" : "agent"
+            "actorId" : "sfn-campaign"
+            "payload" = {
+              "contactId.$" : "$.contactId"
+              "agentRunId.$" : "$.agentRunId"
+              "type" : "note"
+              "actorType" : "agent"
+              "actorId" : "sfn-campaign"
+              "subject" : "Email blocked — no consent"
+              "body" : "Sequence skipped the email step because no email consent record is granted."
+              "metadata" = { "kind" : "consent_block", "channel" : "email" }
+            }
+          }
+        }
+        ResultPath = "$.emailConsentBlock"
+        Next       = "AdvanceSequence"
+      }
+
+      LogSmsConsentBlock = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = var.crm_write_service_arn
+          Payload = {
+            "operation" : "upsert_activity"
+            "tenantId.$" : "$.tenantId"
+            "actorType" : "agent"
+            "actorId" : "sfn-campaign"
+            "payload" = {
+              "contactId.$" : "$.contactId"
+              "agentRunId.$" : "$.agentRunId"
+              "type" : "note"
+              "actorType" : "agent"
+              "actorId" : "sfn-campaign"
+              "subject" : "SMS blocked — no consent"
+              "body" : "Sequence skipped the SMS step because no SMS consent record is granted."
+              "metadata" = { "kind" : "consent_block", "channel" : "sms" }
+            }
+          }
+        }
+        ResultPath = "$.smsConsentBlock"
+        Next       = "AdvanceSequence"
+      }
+
+      LogCallConsentBlock = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = var.crm_write_service_arn
+          Payload = {
+            "operation" : "upsert_activity"
+            "tenantId.$" : "$.tenantId"
+            "actorType" : "agent"
+            "actorId" : "sfn-campaign"
+            "payload" = {
+              "contactId.$" : "$.contactId"
+              "agentRunId.$" : "$.agentRunId"
+              "type" : "note"
+              "actorType" : "agent"
+              "actorId" : "sfn-campaign"
+              "subject" : "Call blocked — no consent"
+              "body" : "Sequence skipped the call step because no call consent record is granted."
+              "metadata" = { "kind" : "consent_block", "channel" : "call" }
+            }
+          }
+        }
+        ResultPath = "$.callConsentBlock"
+        Next       = "AdvanceSequence"
+      }
+
+      VoiceEntitlementGate = {
+        Type = "Choice"
+        Choices = [{
+          And = [
+            {
+              Variable  = "$.campaignConfig.voiceAllowed"
+              IsPresent = true
+            },
+            {
+              Variable      = "$.campaignConfig.voiceAllowed"
+              BooleanEquals = false
+            }
+          ]
+          Next = "LogVoicePaywall"
+        }]
+        Default = "CheckCallConsent"
+      }
+
+      LogVoicePaywall = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = var.crm_write_service_arn
+          Payload = {
+            "operation" : "upsert_activity"
+            "tenantId.$" : "$.tenantId"
+            "actorType" : "agent"
+            "actorId" : "sfn-campaign"
+            "payload" = {
+              "contactId.$" : "$.contactId"
+              "agentRunId.$" : "$.agentRunId"
+              "type" : "note"
+              "actorType" : "agent"
+              "actorId" : "sfn-campaign"
+              "subject" : "Call skipped — Free has no voice"
+              "body" : "Voice is not included on the Free plan. Upgrade to Starter to place qualification calls."
+              "metadata" = { "kind" : "voice_paywall", "channel" : "call" }
+            }
+          }
+        }
+        ResultPath = "$.voicePaywall"
+        Next       = "AdvanceSequence"
       }
 
       # ── 10. Check call consent ─────────────────────────────────────────────
@@ -278,7 +621,7 @@ resource "aws_sfn_state_machine" "campaign" {
           BooleanEquals = true
           Next          = "PlaceVoiceCall"
         }]
-        Default = "LogCompletion"
+        Default = "LogCallConsentBlock"
       }
 
       # ── 12. Place voice call (async — waits for CALL-E webhook) ───────────
@@ -334,12 +677,17 @@ resource "aws_sfn_state_machine" "campaign" {
               "durationSeconds.$" : "$.callResult.durationSeconds"
               "transcriptS3Key.$" : "$.callResult.transcriptS3Key"
               "summaryJson.$" : "$.callResult.summaryJson"
+              "aiDisclosureDeliveredAt.$" : "$.callResult.aiDisclosureDeliveredAt"
+              "aiDisclosureText.$" : "$.callResult.aiDisclosureText"
+              "callingWindowAllowed.$" : "$.callResult.callingWindowAllowed"
+              "callingWindowReason.$" : "$.callResult.callingWindowReason"
+              "dncResult.$" : "$.callResult.dncResult"
             }
           }
         }
         ResultPath = "$.callResultRecord"
         Retry      = local.sfn_retry
-        Next       = "LogCompletion"
+        Next       = "AdvanceSequence"
         Catch = [{
           ErrorEquals = ["States.ALL"]
           Next        = "HandleError"
@@ -461,6 +809,7 @@ resource "aws_iam_role_policy" "sfn" {
           var.research_enrichment_agent_arn,
           var.outreach_agent_arn,
           var.voice_agent_arn,
+          var.sequence_step_arn,
         ]
       },
       {

@@ -1,4 +1,4 @@
-type AgentAction {
+type AgentAction @aws_iam @aws_cognito_user_pools {
   id: ID!
   tenantId: String!
   agentRunId: String!
@@ -12,6 +12,7 @@ type AgentAction {
 
 type Mutation {
   publishAgentAction(input: AgentActionInput!): AgentAction
+    @aws_iam
 }
 
 input AgentActionInput {
@@ -28,9 +29,11 @@ input AgentActionInput {
 
 type Subscription {
   onAgentAction(tenantId: String!): AgentAction
-  @aws_subscribe(mutations: ["publishAgentAction"])
+    @aws_subscribe(mutations: ["publishAgentAction"])
+    @aws_cognito_user_pools
 }
 
 type Query {
   listRecentActions(tenantId: String!, limit: Int): [AgentAction]
+    @aws_cognito_user_pools
 }

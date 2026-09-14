@@ -21,6 +21,12 @@ variable "crm_write_service_arn" {
   description = "ARN of the CRM Write Service Lambda"
 }
 
+variable "sequence_step_arn" {
+  type        = string
+  default     = ""
+  description = "ARN of the sequence-step Lambda that advances campaign cadences"
+}
+
 variable "research_enrichment_agent_arn" {
   type        = string
   default     = ""

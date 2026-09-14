@@ -24,6 +24,11 @@ variable "dynamodb_table" {
   description = "DynamoDB single-table event store name"
 }
 
+variable "app_secret_arn" {
+  type        = string
+  description = "Packed JSON app secret ARN"
+}
+
 variable "agents_event_bus_arn" {
   type        = string
   default     = ""
@@ -40,6 +45,31 @@ variable "calle_webhook_url" {
   type        = string
   default     = ""
   description = "Webhook URL that CALL-E will POST CallCompleted events to"
+}
+
+variable "allow_voice_stub" {
+  type        = string
+  default     = "false"
+  description = "When true and ENV is not prod, VoiceProvider may stub CALL-E. Always false in prod."
+}
+
+variable "dnc_api_url" {
+  type        = string
+  default     = ""
+  description = "DNC scrubber API base URL. Empty means fail-closed except DNC_TEST_NUMBERS."
+}
+
+variable "dnc_api_key" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "DNC scrubber API key"
+}
+
+variable "dnc_test_numbers" {
+  type        = string
+  default     = ""
+  description = "Comma-separated E.164 numbers allowed when no DNC provider is configured (internal tests only)."
 }
 
 variable "enrichment_api_url" {

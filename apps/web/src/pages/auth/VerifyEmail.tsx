@@ -1,141 +1,162 @@
-import { FormEvent, useState } from 'react';
-import { useNavigate, useSearchParams, Link } from 'react-router-dom';
-import { ArrowLeft, CheckCircle2, MailOpen } from 'lucide-react';
-import { confirmSignUp } from '@/lib/auth/cognito';
+import { FormEvent, useEffect, useState } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { ArrowLeft, MailOpen } from 'lucide-react';
 import {
-  CardLayout, FormField, ErrorBanner, PrimaryBtn,
+  confirmSignUp, resendConfirmationCode, authErrorCode, authErrorMessage,
+} from '@/lib/auth/cognito';
+import {
+  CardLayout, FormField, ErrorBanner, NoticeBanner, PrimaryBtn,
 } from '@/components/auth/AuthUI';
-import { motion, AnimatePresence } from 'framer-motion';
+
+// Cognito rate-limits code delivery; a short client-side cooldown stops the
+// button being hammered into LimitExceededException.
+const RESEND_COOLDOWN_S = 30;
 
 export default function VerifyEmail() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const email = params.get('email') ?? '';
+  const emailFromLink = params.get('email') ?? '';
+  const arrivedWithFreshCode = !!params.get('resent') && !!emailFromLink;
 
-  const [code, setCode]     = useState('');
-  const [error, setError]   = useState('');
-  const [loading, setLoading] = useState(false);
-  const [done, setDone]     = useState(false);
+  const [email, setEmail]         = useState(emailFromLink);
+  const [code, setCode]           = useState('');
+  const [error, setError]         = useState('');
+  const [notice, setNotice]       = useState(arrivedWithFreshCode ? `Your email isn't verified yet. We sent a new code to ${emailFromLink}.` : '');
+  const [loading, setLoading]     = useState(false);
+  const [resending, setResending] = useState(false);
+  const [cooldown, setCooldown]   = useState(arrivedWithFreshCode ? RESEND_COOLDOWN_S : 0);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown(c => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
+
+  function continueToSignIn(address: string) {
+    navigate(`/sign-in?verified=1&email=${encodeURIComponent(address)}`, { replace: true });
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    if (code.length < 4) { setError('Please enter the full verification code.'); return; }
+    const address = email.trim();
+    if (!address.includes('@')) { setError('Enter the email you signed up with.'); return; }
+    if (code.length < 6)        { setError('Enter the 6-digit code from the email.'); return; }
     setError('');
+    setNotice('');
     setLoading(true);
+
     try {
-      await confirmSignUp(email, code);
-      setDone(true);
+      await confirmSignUp(address, code);
+      continueToSignIn(address);
     } catch (err) {
-      setError((err as Error).message ?? 'Invalid code. Please check and try again.');
-    } finally {
+      // Confirming an already-confirmed account (second tab, double submit, an
+      // old email) is not a failure from the user's point of view.
+      if (authErrorCode(err) === 'NotAuthorizedException' && /CONFIRMED/i.test((err as Error).message ?? '')) {
+        continueToSignIn(address);
+        return;
+      }
+      setError(authErrorMessage(err, 'Could not verify that code. Please try again.'));
       setLoading(false);
+    }
+  }
+
+  async function handleResend() {
+    const address = email.trim();
+    if (!address.includes('@')) { setError('Enter your email first, then request a new code.'); return; }
+    setError('');
+    setNotice('');
+    setResending(true);
+
+    try {
+      await resendConfirmationCode(address);
+      setNotice(`We sent a new code to ${address}. It can take a minute to arrive — check spam too.`);
+      setCooldown(RESEND_COOLDOWN_S);
+    } catch (err) {
+      if (/already confirmed/i.test((err as Error).message ?? '')) {
+        continueToSignIn(address);
+        return;
+      }
+      setError(authErrorMessage(err, 'Could not send a new code. Please try again.'));
+    } finally {
+      setResending(false);
     }
   }
 
   return (
     <CardLayout>
-      <AnimatePresence mode="wait" initial={false}>
+      <div className="flex justify-center mb-6">
+        <span className="w-14 h-14 rounded-2xl bg-indigo-100 dark:bg-indigo-500/15 flex items-center justify-center">
+          <MailOpen size={26} className="text-indigo-600 dark:text-indigo-400" />
+        </span>
+      </div>
 
-        {!done ? (
-          <motion.div
-            key="verify"
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -16 }}
-            transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-          >
-            {/* Icon */}
-            <div className="flex justify-center mb-6">
-              <span className="w-14 h-14 rounded-2xl bg-indigo-100 dark:bg-indigo-500/15 flex items-center justify-center">
-                <MailOpen size={26} className="text-indigo-600 dark:text-indigo-400" />
-              </span>
-            </div>
+      <div className="text-center mb-7">
+        <h1 className="text-[1.5rem] font-extrabold tracking-tight text-slate-900 dark:text-white mb-2">
+          Check your email
+        </h1>
+        <p className="text-[0.88rem] text-slate-500 dark:text-slate-400 leading-relaxed">
+          {emailFromLink ? (
+            <>We sent a verification code to{' '}
+              <span className="font-semibold text-slate-700 dark:text-slate-300">{emailFromLink}</span>.</>
+          ) : 'Enter your email and the verification code we sent you.'}
+        </p>
+      </div>
 
-            <div className="text-center mb-7">
-              <h1 className="text-[1.5rem] font-extrabold tracking-tight text-slate-900 dark:text-white mb-2">
-                Check your email
-              </h1>
-              <p className="text-[0.88rem] text-slate-500 dark:text-slate-400 leading-relaxed">
-                We sent a verification code to{' '}
-                {email ? (
-                  <span className="font-semibold text-slate-700 dark:text-slate-300">{email}</span>
-                ) : 'your email address'}.
-              </p>
-            </div>
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4" noValidate>
+        {notice && <NoticeBanner message={notice} />}
 
-            <form onSubmit={handleSubmit} className="flex flex-col gap-4" noValidate>
-              <FormField
-                label="Verification code"
-                type="text"
-                inputMode="numeric"
-                placeholder="000000"
-                maxLength={8}
-                value={code}
-                onChange={e => { setCode(e.target.value.replace(/\D/g, '')); setError(''); }}
-                required
-                autoFocus
-              />
-
-              {error && <ErrorBanner message={error} />}
-
-              <PrimaryBtn type="submit" loading={loading}>
-                Verify email →
-              </PrimaryBtn>
-            </form>
-
-            <p className="mt-5 text-center text-[0.8rem] text-slate-400 dark:text-slate-600">
-              Didn't get a code?{' '}
-              <button
-                type="button"
-                className="text-indigo-600 dark:text-indigo-400 hover:underline font-medium"
-                onClick={() => {
-                  // In production: call resendConfirmationCode
-                  setError('');
-                  alert('Resend triggered — implement resendConfirmationCode in cognito.ts');
-                }}
-              >
-                Resend
-              </button>
-            </p>
-
-            <p className="mt-4 text-center">
-              <Link
-                to="/sign-in"
-                className="inline-flex items-center gap-1.5 text-[0.8rem] text-slate-400 hover:text-indigo-500 transition-colors"
-              >
-                <ArrowLeft size={13} /> Back to sign in
-              </Link>
-            </p>
-          </motion.div>
-        ) : (
-          <motion.div
-            key="success"
-            initial={{ opacity: 0, scale: 0.96 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-            className="text-center py-4"
-          >
-            <div className="flex justify-center mb-5">
-              <span className="w-14 h-14 rounded-full bg-emerald-100 dark:bg-emerald-500/15 flex items-center justify-center">
-                <CheckCircle2 size={28} className="text-emerald-600 dark:text-emerald-400" />
-              </span>
-            </div>
-            <h2 className="text-[1.35rem] font-extrabold tracking-tight text-slate-900 dark:text-white mb-2">
-              Email verified!
-            </h2>
-            <p className="text-[0.88rem] text-slate-500 dark:text-slate-400 mb-7 leading-relaxed">
-              Your account is ready. Sign in to launch your first AI agent.
-            </p>
-            <button
-              onClick={() => navigate('/sign-in')}
-              className="inline-flex items-center justify-center w-full h-11 rounded-xl font-semibold text-white text-sm bg-gradient-to-r from-indigo-600 to-violet-600 hover:shadow-lg hover:shadow-indigo-500/30 hover:-translate-y-0.5 transition-all"
-            >
-              Go to sign in →
-            </button>
-          </motion.div>
+        {!emailFromLink && (
+          <FormField
+            label="Work email"
+            type="email"
+            placeholder="you@company.com"
+            value={email}
+            onChange={e => { setEmail(e.target.value); setError(''); }}
+            autoComplete="email"
+            autoFocus
+          />
         )}
 
-      </AnimatePresence>
+        <FormField
+          label="Verification code"
+          type="text"
+          inputMode="numeric"
+          placeholder="000000"
+          maxLength={6}
+          value={code}
+          onChange={e => { setCode(e.target.value.replace(/\D/g, '')); setError(''); }}
+          autoComplete="one-time-code"
+          required
+          autoFocus={!!emailFromLink}
+        />
+
+        {error && <ErrorBanner message={error} />}
+
+        <PrimaryBtn type="submit" loading={loading}>
+          Verify email →
+        </PrimaryBtn>
+      </form>
+
+      <p className="mt-5 text-center text-[0.8rem] text-slate-400 dark:text-slate-600">
+        Didn't get a code?{' '}
+        <button
+          type="button"
+          onClick={handleResend}
+          disabled={resending || cooldown > 0}
+          className="text-indigo-600 dark:text-indigo-400 hover:underline font-medium disabled:text-slate-400 disabled:no-underline disabled:cursor-not-allowed"
+        >
+          {resending ? 'Sending…' : cooldown > 0 ? `Resend in ${cooldown}s` : 'Resend'}
+        </button>
+      </p>
+
+      <p className="mt-4 text-center">
+        <Link
+          to="/sign-in"
+          className="inline-flex items-center gap-1.5 text-[0.8rem] text-slate-400 hover:text-indigo-500 transition-colors"
+        >
+          <ArrowLeft size={13} /> Back to sign in
+        </Link>
+      </p>
     </CardLayout>
   );
 }

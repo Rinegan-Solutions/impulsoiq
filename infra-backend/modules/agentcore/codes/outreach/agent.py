@@ -138,6 +138,7 @@ def run(event: dict) -> dict:
     to_email      = event.get("toEmail", "")
     to_phone      = event.get("toPhone", "")
     config_set    = event.get("configurationSet", os.environ.get("SES_CONFIGURATION_SET", "impulsoiq-dev"))
+    approval      = event.get("approval") if isinstance(event.get("approval"), dict) else {}
 
     if not has_consent:
         # This should never happen — SFN consent gate fires before this agent.
@@ -146,6 +147,20 @@ def run(event: dict) -> dict:
             "channel": channel,
             "sent":    False,
             "error":   "Consent not granted — outreach agent should not have been invoked without consent",
+        }
+
+    approved_body = approval.get("body") or event.get("approvedBody")
+    approved_subject = approval.get("subject") or event.get("approvedSubject")
+    human_approved = bool(approved_body) and not approval.get("auto")
+    allow_unverified = bool(approval.get("allowUnverifiedEmail"))
+
+    pause = check_send_pause(tenant_id)
+    if pause.get("paused"):
+        return {
+            "channel": channel,
+            "sent": False,
+            "error": "send_paused",
+            "pausedReason": pause.get("reason"),
         }
 
     prompt = (
@@ -158,8 +173,14 @@ def run(event: dict) -> dict:
         f"To phone:       {to_phone}\n"
         f"Approval mode:  {approval_mode}\n"
         f"Has consent:    {has_consent}\n"
-        f"Config set:     {config_set}\n\n"
-        f"Follow your pre-flight checklist exactly. Compliance is non-negotiable."
+        f"Config set:     {config_set}\n"
+        f"allow_unverified on send_email_via_ses must be {str(allow_unverified).lower()}.\n\n"
+        + (
+          "A human approved this exact copy. Send it via send_email_via_ses without rewriting:\n"
+          f"Subject: {approved_subject}\nBody:\n{approved_body}\n"
+          if human_approved else
+          "Follow your pre-flight checklist exactly. Compliance is non-negotiable.\n"
+        )
     )
 
     result = agent(prompt)

@@ -1,21 +1,12 @@
-import { useEffect, useState } from 'react';
-import { motion } from 'framer-motion';
-import { Search, ChevronRight } from 'lucide-react';
-import { contactsApi, dealsApi } from '@/api/client';
-import type { Contact, Deal } from '@/api/schemas';
+import { FormEvent, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { Search, ChevronRight, Plus } from 'lucide-react';
+import { accountsApi } from '@/api/client';
+import type { Account } from '@/api/schemas';
 import { AppShell } from '@/components/app/AppShell';
 import { SEO } from '@/components/SEO';
+import { RecordForm, Field, fieldClass } from '@/components/app/RecordForm';
 import { cn } from '@/lib/utils';
-
-interface Account {
-  company:   string;
-  industry:  string;
-  contacts:  Contact[];
-  deals:     Deal[];
-  pipeline:  number;
-  topScore:  number;
-  lastActivity?: string;
-}
 
 function timeAgo(iso?: string) {
   if (!iso) return '—';
@@ -33,78 +24,67 @@ const AVATAR_COLORS = [
 
 export default function AccountsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [loading, setLoading]   = useState(true);
-  const [search, setSearch]     = useState('');
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ name: '', domain: '', industry: '' });
+  const [saving, setSaving] = useState(false);
+
+  async function load(term = search) {
+    setLoading(true);
+    try {
+      const res = await accountsApi.list(1, 50, term);
+      setAccounts(res.items);
+      setTotal(res.total);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
-    Promise.all([
-      contactsApi.list(1, 100),
-      dealsApi.list(),
-    ]).then(([contactsRes, dealsRes]) => {
-      const contactList = contactsRes.items;
-      const dealList    = dealsRes.items;
+    const t = setTimeout(() => { void load(search); }, 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
 
-      const map = new Map<string, Account>();
-      // "Company" is account.name, joined onto both contacts and deals by
-      // list_contacts / list_deals. A contact with no account_id has no company
-      // and cannot be grouped, so it is skipped rather than bucketed under a
-      // placeholder that would look like a real account.
-      contactList.forEach(c => {
-        const company = c.accountName;
-        if (!company) return;
-        if (!map.has(company)) {
-          map.set(company, {
-            company, industry: 'Unknown',
-            contacts: [], deals: [], pipeline: 0, topScore: 0,
-          });
-        }
-        const acc = map.get(company)!;
-        acc.contacts.push(c);
-        if ((c.score ?? 0) > acc.topScore) acc.topScore = c.score ?? 0;
-        if (!acc.lastActivity || (c.lastActivityAt && c.lastActivityAt > acc.lastActivity))
-          acc.lastActivity = c.lastActivityAt ?? undefined;
-      });
-
-      dealList.forEach((d) => {
-        if (!d.accountName) return;
-        const acc = map.get(d.accountName);
-        if (!acc) return;
-        acc.deals.push(d);
-        if (d.stage !== 'Closed Won') acc.pipeline += d.amount;
-      });
-
-      setAccounts([...map.values()].sort((a, b) => b.pipeline - a.pipeline || b.contacts.length - a.contacts.length));
-    }).finally(() => setLoading(false));
-  }, []);
-
-  const filtered = search
-    ? accounts.filter(a => a.company.toLowerCase().includes(search.toLowerCase()) || a.industry.toLowerCase().includes(search.toLowerCase()))
-    : accounts;
+  async function createAccount(e: FormEvent) {
+    e.preventDefault();
+    if (!form.name.trim()) return;
+    setSaving(true);
+    try {
+      await accountsApi.create({ name: form.name.trim(), domain: form.domain.trim() || undefined, industry: form.industry.trim() || undefined });
+      setCreating(false);
+      setForm({ name: '', domain: '', industry: '' });
+      await load();
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
     <AppShell>
-      <SEO title="Accounts — ImpulsoIQ" description="Company account management" />
+      <SEO title="Companies — ImpulsoIQ" description="Company account records" />
       <div className="px-4 sm:px-6 py-6">
-
-        {/* Header */}
         <div className="flex items-center justify-between mb-5">
           <div>
-            <h1 className="text-[1.25rem] font-extrabold tracking-tight text-slate-900 dark:text-white">Accounts</h1>
-            <p className="text-[0.82rem] text-slate-500 dark:text-slate-400 mt-0.5">{accounts.length} companies tracked</p>
+            <h1 className="text-[1.25rem] font-extrabold tracking-tight text-slate-900 dark:text-white">Companies</h1>
+            <p className="text-[0.82rem] text-slate-500 dark:text-slate-400 mt-0.5">{total} accounts in this workspace</p>
           </div>
+          <button type="button" onClick={() => setCreating(true)} className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600">
+            <Plus size={15} /> Add company
+          </button>
         </div>
 
-        {/* Search */}
         <div className="relative max-w-sm mb-5">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
-            type="text" placeholder="Search companies or industries…"
+            type="text" placeholder="Search companies…"
             value={search} onChange={e => setSearch(e.target.value)}
             className="w-full h-9 pl-8 pr-3 text-sm rounded-xl border border-slate-200 dark:border-white/[0.1] bg-white dark:bg-white/[0.04] text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition"
           />
         </div>
 
-        {/* Table */}
         <div className="bg-white dark:bg-[#0d1526] border border-slate-200 dark:border-white/[0.065] rounded-2xl overflow-hidden">
           <div className="grid px-5 py-2.5 border-b border-slate-100 dark:border-white/[0.04] text-[0.67rem] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-600 bg-slate-50/60 dark:bg-white/[0.02]"
             style={{ gridTemplateColumns: '1fr 120px 80px 80px 120px 100px 30px' }}>
@@ -114,37 +94,46 @@ export default function AccountsPage() {
           </div>
 
           {loading ? (
-            <div className="py-16 text-center text-[0.84rem] text-slate-400 dark:text-slate-600">Loading accounts…</div>
-          ) : filtered.length === 0 ? (
-            <div className="py-16 text-center text-[0.84rem] text-slate-400 dark:text-slate-600">No accounts found</div>
-          ) : filtered.map((acc, i) => (
-            <motion.div
-              key={acc.company}
-              initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: i * 0.025 }}
-              className="grid px-5 py-3.5 border-b border-slate-50 dark:border-white/[0.03] last:border-0 items-center text-[0.82rem] hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors cursor-pointer group"
+            <div className="py-16 text-center text-[0.84rem] text-slate-400 dark:text-slate-600">Loading companies…</div>
+          ) : accounts.length === 0 ? (
+            <div className="py-16 text-center text-[0.84rem] text-slate-400 dark:text-slate-600">
+              No companies yet. <Link to="/home?intent=compose" className="text-indigo-600 font-semibold">Start from Home</Link>
+            </div>
+          ) : accounts.map((acc, i) => (
+            <Link
+              key={acc.id}
+              to={`/accounts/${acc.id}`}
+              className="grid px-5 py-3.5 border-b border-slate-50 dark:border-white/[0.03] last:border-0 items-center text-[0.82rem] hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors group"
               style={{ gridTemplateColumns: '1fr 120px 80px 80px 120px 100px 30px' }}
             >
               <div className="flex items-center gap-3 min-w-0">
                 <div className={cn('w-8 h-8 rounded-xl bg-gradient-to-br text-white text-[0.65rem] font-bold flex items-center justify-center flex-shrink-0', AVATAR_COLORS[i % AVATAR_COLORS.length])}>
-                  {acc.company.slice(0, 2).toUpperCase()}
+                  {acc.name.slice(0, 2).toUpperCase()}
                 </div>
                 <div className="min-w-0">
-                  <p className="font-semibold text-slate-800 dark:text-slate-200 truncate">{acc.company}</p>
-                  <p className="text-[0.7rem] text-slate-400 dark:text-slate-600">{acc.contacts.length} contact{acc.contacts.length !== 1 ? 's' : ''}</p>
+                  <p className="font-semibold text-slate-800 dark:text-slate-200 truncate">{acc.name}</p>
+                  <p className="text-[0.7rem] text-slate-400 dark:text-slate-600">{acc.domain ?? `${acc.contactCount ?? 0} contacts`}</p>
                 </div>
               </div>
-              <span className="text-[0.75rem] bg-slate-100 dark:bg-white/[0.07] text-slate-600 dark:text-slate-400 px-2 py-0.5 rounded-lg w-fit">{acc.industry}</span>
-              <span className="text-center font-semibold text-slate-700 dark:text-slate-300">{acc.contacts.length}</span>
-              <span className="text-center font-semibold text-indigo-600 dark:text-indigo-400">{acc.deals.length}</span>
+              <span className="text-[0.75rem] bg-slate-100 dark:bg-white/[0.07] text-slate-600 dark:text-slate-400 px-2 py-0.5 rounded-lg w-fit">{acc.industry ?? '—'}</span>
+              <span className="text-center font-semibold text-slate-700 dark:text-slate-300">{acc.contactCount ?? 0}</span>
+              <span className="text-center font-semibold text-indigo-600 dark:text-indigo-400">{acc.dealCount ?? 0}</span>
               <span className="font-semibold text-slate-800 dark:text-slate-200">
-                {acc.pipeline > 0 ? `$${(acc.pipeline/1000).toFixed(0)}K` : <span className="text-slate-400 dark:text-slate-600">—</span>}
+                {(acc.pipeline ?? 0) > 0 ? `$${((acc.pipeline ?? 0)/1000).toFixed(0)}K` : <span className="text-slate-400 dark:text-slate-600">—</span>}
               </span>
-              <span className="text-[0.75rem] text-slate-400 dark:text-slate-600">{timeAgo(acc.lastActivity)}</span>
+              <span className="text-[0.75rem] text-slate-400 dark:text-slate-600">{timeAgo(acc.lastActivityAt ?? undefined)}</span>
               <ChevronRight size={14} className="text-slate-300 dark:text-slate-700 opacity-0 group-hover:opacity-100 transition-opacity" />
-            </motion.div>
+            </Link>
           ))}
         </div>
       </div>
+      {creating && (
+        <RecordForm title="New company" onClose={() => setCreating(false)} onSubmit={(e) => void createAccount(e)} busy={saving}>
+          <Field label="Name"><input required className={fieldClass} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+          <Field label="Domain"><input className={fieldClass} value={form.domain} onChange={(e) => setForm({ ...form, domain: e.target.value })} /></Field>
+          <Field label="Industry"><input className={fieldClass} value={form.industry} onChange={(e) => setForm({ ...form, industry: e.target.value })} /></Field>
+        </RecordForm>
+      )}
     </AppShell>
   );
 }

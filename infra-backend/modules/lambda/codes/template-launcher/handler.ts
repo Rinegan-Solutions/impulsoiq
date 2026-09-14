@@ -18,14 +18,42 @@
  *   - The SFN receives a skip_automated_call flag for the agent to read
  */
 import type { APIGatewayProxyHandler } from 'aws-lambda';
+import { randomUUID } from 'node:crypto';
+import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { DsqlSigner } from '@aws-sdk/dsql-signer';
 import { Client } from 'pg';
 
 const sfn    = new SFNClient({});
+const ssm    = new SSMClient({});
+const lambda = new LambdaClient({});
 const REGION = process.env.AWS_REGION ?? 'eu-west-2';
-const STATE_MACHINE_ARN = process.env.STATE_MACHINE_ARN!;
 const DSQL_ENDPOINT     = process.env.DSQL_ENDPOINT!;
+
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'Content-Type,Authorization,x-impulsoiq-tenant',
+  'Content-Type': 'application/json',
+};
+
+function json(statusCode: number, body: unknown) {
+  return { statusCode, headers: CORS, body: JSON.stringify(body) };
+}
+
+let stateMachineArnCache: string | undefined;
+
+async function stateMachineArn(): Promise<string> {
+  if (process.env.STATE_MACHINE_ARN) return process.env.STATE_MACHINE_ARN;
+  if (stateMachineArnCache) return stateMachineArnCache;
+  const path = process.env.STATE_MACHINE_ARN_SSM_PATH;
+  if (!path) throw new Error('STATE_MACHINE_ARN is not configured');
+  const resp = await ssm.send(new GetParameterCommand({ Name: path }));
+  const value = resp.Parameter?.Value ?? '';
+  if (!value) throw new Error('STATE_MACHINE_ARN_SSM_PATH resolved empty');
+  stateMachineArnCache = value;
+  return value;
+}
 
 // ── Embedded template definitions (mirrors templates.py) ─────────────────────
 // Duplicated here so the Lambda doesn't need to call a Python service.
@@ -128,7 +156,13 @@ export const handler: APIGatewayProxyHandler = async (event) => {
   // (custom authorizer) and not .jwt.claims (HTTP API v2).
   const claims = event.requestContext.authorizer?.claims as Record<string, string> | undefined;
   const tenantId = claims?.['custom:tenant_id'];
-  if (!tenantId) return { statusCode: 401, body: JSON.stringify({ error: 'Unauthorized' }) };
+  if (!tenantId) return json(401, { error: 'Unauthorized' });
+  // The claim is chosen by the browser at sign-up; membership is the Cognito
+  // group tenant-provisioner grants. Same rule as hasWorkspaceRole in crm-read.
+  const groups = String(claims?.['cognito:groups'] ?? '').split(/[\s,[\]"]+/);
+  if (!groups.some((g) => g === 'admin' || g === 'manager' || g === 'member')) {
+    return json(403, { error: 'This account has not been granted access to its workspace' });
+  }
 
   const body = JSON.parse(event.body ?? '{}') as {
     templateKey:  string;
@@ -140,23 +174,32 @@ export const handler: APIGatewayProxyHandler = async (event) => {
 
   const template = TEMPLATES[templateKey];
   if (!template) {
-    return { statusCode: 400, body: JSON.stringify({ error: `Unknown template: ${templateKey}` }) };
+    return json(400, { error: `Unknown template: ${templateKey}` });
   }
 
   // Legal review gate (5B only)
   if (template.requiresLegalReview) {
     const reviewed = await checkLegalReview(tenantId, templateKey);
     if (!reviewed) {
-      return {
-        statusCode: 403,
-        body: JSON.stringify({
-          error:   'Template requires legal review before activation',
-          template: templateKey,
-          action:  'Set legal_reviewed_by and legal_reviewed_at in workspace_template table',
-        }),
-      };
+      return json(403, {
+        error:   'Template requires legal review before activation',
+        template: templateKey,
+        action:  'Set legal_reviewed_by and legal_reviewed_at in workspace_template table',
+      });
     }
   }
+
+  const db = await getDb();
+  const active = await db.query(
+    `SELECT status FROM workspace_template WHERE tenant_id = $1 AND template_key = $2`,
+    [tenantId, templateKey],
+  );
+  if (String(active.rows[0]?.status ?? '') !== 'active') {
+    return json(409, { error: 'Activate this template on Workspace before launching it' });
+  }
+  const tenant = await db.query(`SELECT tier FROM tenant WHERE id = $1`, [tenantId]);
+  const voiceAllowed = String(tenant.rows[0]?.tier ?? 'free') !== 'free';
+  const crmWrite = process.env.CRM_WRITE_SERVICE_ARN ?? '';
 
   // Start SFN executions for each target
   const executions: string[] = [];
@@ -170,17 +213,43 @@ export const handler: APIGatewayProxyHandler = async (event) => {
 
     if (skipCall) {
       skipped.push(targetId);
-      // TODO: create a human-escalation activity record via CRM Write Service
+      if (crmWrite) {
+        await lambda.send(new InvokeCommand({
+          FunctionName: crmWrite,
+          Payload: Buffer.from(JSON.stringify({
+            operation: 'upsert_activity',
+            tenantId,
+            actorType: 'agent',
+            actorId: 'template-launcher',
+            payload: {
+              contactId: targetId,
+              type: 'note',
+              actorType: 'agent',
+              actorId: 'template-launcher',
+              subject: 'AR threshold — human escalation',
+              body: 'Automated AR call skipped: days overdue or amount crossed the deterministic threshold. A human must continue.',
+              metadata: { kind: 'ar_escalation', daysOverdue, amountUsd },
+            },
+          })),
+        }));
+      }
       continue;
     }
 
+    const smArn = await stateMachineArn();
     const resp = await sfn.send(new StartExecutionCommand({
-      stateMachineArn: STATE_MACHINE_ARN,
+      stateMachineArn: smArn,
       name:            `${templateKey}-${targetId}-${Date.now()}`,
       input:           JSON.stringify({
         tenantId,
         contactId:  targetId,
+        agentRunId: randomUUID(),
         templateKey,
+        campaignConfig: {
+          requiresApproval: String(template.approvalGateConfig.mode ?? '') !== 'never',
+          voiceAllowed,
+          templateKey,
+        },
         templateContext: {
           brandVoiceProfile:  template.brandVoiceProfile,
           complianceRules:    template.complianceRules,
@@ -194,13 +263,10 @@ export const handler: APIGatewayProxyHandler = async (event) => {
     if (resp.executionArn) executions.push(resp.executionArn);
   }
 
-  return {
-    statusCode: 202,
-    body: JSON.stringify({
-      started:  executions.length,
-      skipped:  skipped.length,
-      template: templateKey,
-      executions,
-    }),
-  };
+  return json(202, {
+    started:  executions.length,
+    skipped:  skipped.length,
+    template: templateKey,
+    executions,
+  });
 };

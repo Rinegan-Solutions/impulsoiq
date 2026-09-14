@@ -42,6 +42,14 @@ export const AgentTypeSchema = z.enum([
   'outreach',
   'voice',
   'nurture',
+  'forecasting_insight',
+  'data_hygiene',
+  'ambient_interface',
+  'deep_research',
+  'signal_listening',
+  'triage_escalation',
+  'resolution',
+  'support_insight',
 ]);
 
 // ─── Core entities ────────────────────────────────────────────────────────────
@@ -95,13 +103,14 @@ export const AgentRunSchema = z.object({
   id: z.string(),
   tenantId: z.string(),
   campaignId: z.string().nullable().optional(),
-  contactId: z.string(),
+  contactId: z.string().nullable().optional(),
   agentType: AgentTypeSchema,
   status: AgentRunStatusSchema,
   stepFunctionsExecutionArn: z.string().nullable().optional(),
   input: z.record(z.string(), z.unknown()).optional(),
   output: z.record(z.string(), z.unknown()).nullable().optional(),
   error: z.string().nullable().optional(),
+  costJson: z.record(z.string(), z.unknown()).nullable().optional(),
   startedAt: z.string(),
   endedAt: z.string().nullable().optional(),
   createdAt: z.string().optional(),
@@ -129,6 +138,75 @@ export const DealSchema = z.object({
   // Joined by list_deals from `account`.
   accountName: z.string().nullable().optional(),
 });
+
+export const AccountSchema = z.object({
+  id: z.string(),
+  tenantId: z.string(),
+  name: z.string(),
+  domain: z.string().nullable().optional(),
+  industry: z.string().nullable().optional(),
+  website: z.string().nullable().optional(),
+  employeeCount: z.coerce.number().nullable().optional(),
+  annualRevenue: z.coerce.number().nullable().optional(),
+  enrichmentJson: z.record(z.string(), z.unknown()).optional(),
+  customFields: z.record(z.string(), z.unknown()).optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  contactCount: z.coerce.number().optional(),
+  dealCount: z.coerce.number().optional(),
+  pipeline: z.coerce.number().optional(),
+  lastActivityAt: z.string().nullable().optional(),
+});
+
+export const ActivitySchema = z.object({
+  id: z.string(),
+  tenantId: z.string().optional(),
+  contactId: z.string().nullable().optional(),
+  accountId: z.string().nullable().optional(),
+  dealId: z.string().nullable().optional(),
+  agentRunId: z.string().nullable().optional(),
+  type: ActivityTypeSchema,
+  actorType: ActorTypeSchema,
+  actorId: z.string(),
+  subject: z.string().nullable().optional(),
+  body: z.string().nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+  occurredAt: z.string(),
+  createdAt: z.string().optional(),
+  firstName: z.string().nullable().optional(),
+  lastName: z.string().nullable().optional(),
+  email: z.string().nullable().optional(),
+  accountName: z.string().nullable().optional(),
+});
+
+export const SequenceStepSchema = z.object({
+  id: z.string().optional(),
+  type: z.enum(['email', 'sms', 'wait', 'call', 'task']),
+  waitSeconds: z.coerce.number().optional(),
+  subject: z.string().optional(),
+  body: z.string().optional(),
+  title: z.string().optional(),
+});
+
+export const SequenceSchema = z.object({
+  id: z.string(),
+  tenantId: z.string().optional(),
+  name: z.string(),
+  status: z.enum(['draft', 'active', 'archived']),
+  steps: z.array(SequenceStepSchema),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+}).passthrough();
+
+export const EnrichmentRecordSchema = z.object({
+  id: z.string().optional(),
+  source: z.string(),
+  field: z.string(),
+  value: z.string().nullable().optional(),
+  confidence: z.coerce.number(),
+  fetchedAt: z.string().optional(),
+  decayPolicy: z.string().optional(),
+}).passthrough();
 
 // The FORECASTING projection from get_pipeline_data. Deliberately separate
 // from DealSchema: that query omits tenant_id/account_id, excludes Closed Won,
@@ -237,9 +315,13 @@ export const PaginatedSchema = <T extends z.ZodTypeAny>(item: T) =>
 // ─── Inferred TypeScript types ────────────────────────────────────────────────
 
 export type Contact = z.infer<typeof ContactSchema>;
+export type Account = z.infer<typeof AccountSchema>;
 export type Campaign = z.infer<typeof CampaignSchema>;
 export type AgentRun = z.infer<typeof AgentRunSchema>;
 export type Deal = z.infer<typeof DealSchema>;
+export type Activity = z.infer<typeof ActivitySchema>;
+export type Sequence = z.infer<typeof SequenceSchema>;
+export type EnrichmentRecord = z.infer<typeof EnrichmentRecordSchema>;
 export type PipelineDeal = z.infer<typeof PipelineDealSchema>;
 export type DashboardStats = z.infer<typeof DashboardStatsSchema>;
 export type RegistryEntry = z.infer<typeof RegistryEntrySchema>;

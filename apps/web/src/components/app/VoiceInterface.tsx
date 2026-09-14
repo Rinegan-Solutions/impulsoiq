@@ -5,14 +5,39 @@
  * voice session panel that captures browser microphone input, streams it
  * to the voice-bridge Lambda via WebSocket, and displays responses.
  *
- * For the hackathon demo: TEXT MODE — the user types into the panel and
- * receives text responses. The WebSocket + microphone capture is wired up
- * but audio encoding is commented out pending a live Nova Sonic endpoint.
+ * TEXT MODE: the user types into the panel. Each message goes over the voice
+ * WebSocket (VITE_VOICE_WS_URL) as {type:"text", message, sessionId}, and
+ * voice-bridge answers {type:"response"} or {type:"error"}. Microphone capture
+ * is not wired yet.
+ *
+ * AUTH: the socket opens with ?token=<Cognito ID token>&workspace=<slug>.
+ * voice-bridge verifies the token on $connect and binds the connection to the
+ * token's workspace; nothing tenant-shaped in a message is trusted. When the
+ * token outlives its hour the bridge answers code "session_expired", and the
+ * panel reconnects once with a fresh token and resends.
+ *
+ * This previously POSTed to /api/voice/message — a path that exists on no API
+ * (it fell through to CloudFront and came back as index.html) — with a tenant
+ * of 'demo' whenever none was passed, which was always. The tenant now comes
+ * from the signed-in user's claim.
  */
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Mic, X, Loader2, Volume2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useAuth } from '@/lib/auth/useAuth';
+import { getCurrentToken } from '@/lib/auth/cognito';
+import { currentTenantSlug } from '@/lib/tenant';
+
+// Injected at build time from SSM (/impulsoiq/<env>/backend/voice_ws_url).
+const VOICE_WS_URL = import.meta.env.VITE_VOICE_WS_URL ?? '';
+
+interface BridgeMessage {
+  type: 'processing' | 'response' | 'error' | 'pong';
+  text?: string;
+  error?: string;
+  code?: string;
+}
 
 interface Message {
   role: 'user' | 'assistant';
@@ -20,58 +45,138 @@ interface Message {
   ts:   number;
 }
 
-export function VoiceInterface({ tenantId }: { tenantId?: string }) {
+export function VoiceInterface() {
+  const { user } = useAuth();
   const [open, setOpen]         = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput]       = useState('');
   const [loading, setLoading]   = useState(false);
-  const wsRef  = useRef<WebSocket | null>(null);
+  const wsRef         = useRef<WebSocket | null>(null);
+  const connectingRef = useRef<Promise<WebSocket> | null>(null);
+  // One conversation per panel lifetime, so the agent keeps context between turns.
+  const sessionIdRef  = useRef<string>(crypto.randomUUID());
+  // The message awaiting a reply, kept so an expired session can resend it once.
+  const inFlightRef   = useRef<{ text: string; retried: boolean } | null>(null);
+  const retryingRef   = useRef(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Connect to WebSocket when panel opens
+  // The socket lives only while the panel is open.
   useEffect(() => {
-    if (!open || wsRef.current) return;
-
-    // For demo: use the REST API fallback instead of WebSocket
-    // In production: wsRef.current = new WebSocket(process.env.VITE_VOICE_WS_URL);
-    return () => {
-      wsRef.current?.close();
-      wsRef.current = null;
-    };
+    if (open) return;
+    dropSocket();
   }, [open]);
+
+  useEffect(() => () => { wsRef.current?.close(); }, []);
 
   // Auto-scroll to latest message
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  function push(role: Message['role'], text: string) {
+    setMessages(p => [...p, { role, text, ts: Date.now() }]);
+  }
+
+  function dropSocket() {
+    const ws = wsRef.current;
+    wsRef.current = null;
+    connectingRef.current = null;
+    ws?.close();
+  }
+
+  function handleBridgeMessage(event: MessageEvent) {
+    let msg: BridgeMessage;
+    try { msg = JSON.parse(String(event.data)) as BridgeMessage; } catch { return; }
+
+    if (msg.type === 'response') {
+      inFlightRef.current = null;
+      push('assistant', msg.text || "Sorry, I couldn't process that.");
+      setLoading(false);
+      return;
+    }
+    if (msg.type !== 'error') return;
+
+    const inFlight = inFlightRef.current;
+    if (msg.code === 'session_expired' && inFlight && !inFlight.retried) {
+      // The bridge closes this connection; open a new one with a fresh token.
+      inFlight.retried = true;
+      retryingRef.current = true;
+      dropSocket();
+      void deliver(inFlight.text).finally(() => { retryingRef.current = false; });
+      return;
+    }
+    inFlightRef.current = null;
+    push('assistant', msg.error || 'Something went wrong. Please try again.');
+    setLoading(false);
+  }
+
+  function openSocket(): Promise<WebSocket> {
+    const current = wsRef.current;
+    if (current && current.readyState === WebSocket.OPEN) return Promise.resolve(current);
+    if (connectingRef.current) return connectingRef.current;
+
+    const pending = (async () => {
+      // getCurrentToken refreshes an expired ID token, so a reconnect always
+      // presents a valid one.
+      const token = await getCurrentToken();
+      if (!token) throw new Error('signed out');
+      const url = new URL(VOICE_WS_URL);
+      url.searchParams.set('token', token);
+      const workspace = currentTenantSlug();
+      if (workspace) url.searchParams.set('workspace', workspace);
+
+      return new Promise<WebSocket>((resolve, reject) => {
+        const ws = new WebSocket(url.toString());
+        ws.onopen = () => {
+          wsRef.current = ws;
+          connectingRef.current = null;
+          resolve(ws);
+        };
+        // A refused $connect (401/403) surfaces here as a failed handshake.
+        ws.onerror = () => {
+          connectingRef.current = null;
+          reject(new Error('assistant unreachable'));
+        };
+        ws.onclose = () => {
+          if (wsRef.current === ws) wsRef.current = null;
+          if (!retryingRef.current && inFlightRef.current) {
+            inFlightRef.current = null;
+            setLoading(false);
+          }
+        };
+        ws.onmessage = handleBridgeMessage;
+      });
+    })();
+
+    pending.catch(() => { connectingRef.current = null; });
+    connectingRef.current = pending;
+    return pending;
+  }
+
+  async function deliver(text: string) {
+    try {
+      const ws = await openSocket();
+      ws.send(JSON.stringify({ type: 'text', message: text, sessionId: sessionIdRef.current }));
+    } catch {
+      inFlightRef.current = null;
+      push('assistant', 'Could not reach the assistant. Please try again.');
+      setLoading(false);
+    }
+  }
+
   async function sendMessage(text: string) {
     if (!text.trim() || loading) return;
     setInput('');
-    setLoading(true);
+    push('user', text);
 
-    const userMsg: Message = { role: 'user', text, ts: Date.now() };
-    setMessages(p => [...p, userMsg]);
-
-    try {
-      // Demo mode: call the REST endpoint for the ambient agent
-      const res = await fetch('/api/voice/message', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ tenantId: tenantId ?? 'demo', message: text, textMode: true }),
-      });
-      const data = await res.json() as { response?: string };
-      const reply: Message = {
-        role: 'assistant',
-        text: data.response ?? 'Sorry, I couldn\'t process that.',
-        ts:   Date.now(),
-      };
-      setMessages(p => [...p, reply]);
-    } catch {
-      setMessages(p => [...p, { role: 'assistant', text: 'Connection error. Please try again.', ts: Date.now() }]);
-    } finally {
-      setLoading(false);
+    if (!VOICE_WS_URL || !user) {
+      push('assistant', 'The assistant is not configured for this environment.');
+      return;
     }
+
+    setLoading(true);
+    inFlightRef.current = { text, retried: false };
+    await deliver(text);
   }
 
   return (
@@ -128,7 +233,7 @@ export function VoiceInterface({ tenantId }: { tenantId?: string }) {
                   </div>
                   <p className="text-[0.84rem] font-semibold text-slate-700 dark:text-slate-300">Say something</p>
                   <p className="text-[0.75rem] text-slate-400 dark:text-slate-600 mt-1">
-                    "How did the Meridian call go?" · "What's in my pipeline?" · "Brief me"
+                    "What's in my pipeline?" · "Brief me on today"
                   </p>
                 </div>
               )}

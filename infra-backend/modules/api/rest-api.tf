@@ -17,9 +17,10 @@
 # AUTH
 # COGNITO_USER_POOLS on everything a signed-in user calls. Three endpoints are
 # deliberately public because the caller cannot have a token:
-#   org-check       -- called during sign-up, before an account exists
-#   webhooks/calle  -- called by CALL-E, an external service
-#   csat            -- called from a survey link in an email
+#   org-check        -- called during sign-up, before an account exists
+#   webhooks/calle   -- called by CALL-E, an external service
+#   webhooks-stripe  -- called by Stripe; verified by signature, not Cognito
+#   csat             -- called from a survey link in an email
 #
 # CORS
 # Access-Control-Allow-Origin is "*" with credentials OFF. The API is
@@ -47,6 +48,16 @@ locals {
       method     = "POST"
       authorized = true
     }
+    "control" = {
+      lambda     = "execution-controller"
+      method     = "POST"
+      authorized = true
+    }
+    "intent" = {
+      lambda     = "intent-service"
+      method     = "POST"
+      authorized = true
+    }
     "leads" = {
       lambda     = "lead-router"
       method     = "POST"
@@ -69,6 +80,16 @@ locals {
     }
     "csat" = {
       lambda     = "csat-capture"
+      method     = "POST"
+      authorized = false
+    }
+    "billing" = {
+      lambda     = "billing-service"
+      method     = "POST"
+      authorized = true
+    }
+    "webhooks-stripe" = {
+      lambda     = "billing-service"
       method     = "POST"
       authorized = false
     }

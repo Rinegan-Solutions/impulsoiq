@@ -1,36 +1,76 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Pause, Play, XCircle, RefreshCw } from 'lucide-react';
-import { agentRunsApi } from '@/api/client';
+import { Pause, Play, XCircle, RefreshCw, ShieldOff } from 'lucide-react';
+import { agentRunsApi, controlApi, intentApi } from '@/api/client';
 import type { AgentRun } from '@/api/schemas';
 import { AppShell } from '@/components/app/AppShell';
 import { SEO } from '@/components/SEO';
 import { cn } from '@/lib/utils';
 import { useNow } from '@/lib/useNow';
+import { subscribeAgentActions, appsyncConfigured } from '@/lib/appsync';
 
-type FeedType = 'research'|'outreach'|'voice'|'crm'|'coord';
-const FEED_DATA: {type: FeedType; msg: string}[] = [
-  {type:'research', msg:'Enriched Sarah Chen · Acme Corp · 3 intent signals found'},
-  {type:'coord',    msg:'Coordinator: routing Marcus Webb → Outreach agent'},
-  {type:'outreach', msg:'Email sent → Priya Nair · "Q4 growth efficiency" subject line'},
-  {type:'voice',    msg:'Call completed: Jennifer Park · demo booked 2026-09-05 14:00'},
-  {type:'crm',      msg:'Deal created: Circlepoint · $48,000 · Stage: Qualified'},
-  {type:'research', msg:'Found: Daniel Osei · CRO · raised $45M Series B'},
-  {type:'outreach', msg:'Follow-up SMS → Aiko Tanaka · consent verified · reply-to on'},
-  {type:'voice',    msg:'Voicemail: Carlos Rivera · retry scheduled 4h · transcript saved'},
-  {type:'crm',      msg:'Contact score raised: Rania Khalid 72 → 87 · 3× email opens'},
-  {type:'coord',    msg:'Approval gate triggered: Northvault $120K — awaiting review'},
-  {type:'outreach', msg:'Sequence paused: Lisa Chen replied → routed to human AE'},
-];
+const FEED_POLL_MS = 15_000;
 
-const FEED_CLS: Record<FeedType, string> = {
-  research: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300',
-  outreach: 'bg-cyan-100 text-cyan-700 dark:bg-cyan-500/15 dark:text-cyan-300',
-  voice:    'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
-  crm:      'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
-  coord:    'bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300',
+const AGENT_LABEL: Record<string, string> = {
+  research_enrichment: 'Research',
+  outreach:            'Outreach',
+  voice:               'Voice',
+  nurture:             'Nurture',
+  clarification:       'Clarify',
+  coordinator:         'Coord',
+  forecasting_insight: 'Forecast',
+  data_hygiene:        'Hygiene',
+  ambient_interface:   'Ambient',
+  deep_research:       'Research+',
+  signal_listening:    'Signals',
+  triage_escalation:   'Triage',
+  resolution:          'Resolve',
+  support_insight:     'Support',
 };
-const FEED_LABEL: Record<FeedType, string> = { research:'Research', outreach:'Outreach', voice:'Voice', crm:'CRM', coord:'Coord' };
+
+const STATUS_TEXT: Record<AgentRun['status'], string> = {
+  pending:   'queued',
+  running:   'started',
+  paused:    'paused',
+  completed: 'completed',
+  failed:    'failed',
+};
+
+interface FeedEntry {
+  key: string;
+  at: number;
+  agentType: AgentRun['agentType'];
+  text: string;
+  failed: boolean;
+}
+
+function toFeed(runs: AgentRun[]): FeedEntry[] {
+  return runs
+    .map((r) => {
+      const who = [r.firstName, r.lastName].filter(Boolean).join(' ') || r.agentType;
+      const at = new Date(r.endedAt ?? r.startedAt).getTime();
+      const block = r.error && /consent|dnc|window|paused|kill/i.test(r.error) ? ` · ${r.error}` : '';
+      const detail = r.status === 'failed' && r.error ? ` · ${r.error}` : block;
+      return {
+        key: `${r.id}:${r.status}:${r.error ?? ''}`,
+        at: Number.isNaN(at) ? 0 : at,
+        agentType: r.agentType,
+        text: `${who} · ${STATUS_TEXT[r.status]}${detail}`,
+        failed: r.status === 'failed',
+      };
+    })
+    .sort((a, b) => b.at - a.at)
+    .slice(0, 15);
+}
+
+function clockTime(ms: number, now: number): string {
+  if (!ms) return '—';
+  const d = new Date(ms);
+  return new Date(now).toDateString() === d.toDateString()
+    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleDateString([], { day: '2-digit', month: 'short' });
+}
 
 const STATUS_CLS: Record<AgentRun['status'], string> = {
   running:   'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400',
@@ -42,10 +82,7 @@ const STATUS_CLS: Record<AgentRun['status'], string> = {
 const STATUS_DOT: Record<AgentRun['status'], string> = {
   running:'bg-emerald-500 animate-pulse', paused:'bg-amber-500', completed:'bg-indigo-500', pending:'bg-slate-400', failed:'bg-red-500',
 };
-// Keys must match agent_run.agent_type's CHECK constraint in schema.sql.
-// They previously used invented short names (research/crm/coord) that the
-// database can never emit, so every badge fell through to undefined.
-const AGENT_CLS: Record<AgentRun['agentType'], string> = {
+const AGENT_CLS: Record<string, string> = {
   research_enrichment: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300',
   outreach:      'bg-cyan-100 text-cyan-700 dark:bg-cyan-500/15 dark:text-cyan-300',
   voice:         'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
@@ -53,80 +90,185 @@ const AGENT_CLS: Record<AgentRun['agentType'], string> = {
   clarification: 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300',
   coordinator:   'bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300',
 };
+const FALLBACK_AGENT_CLS = 'bg-slate-100 text-slate-600 dark:bg-white/[0.07] dark:text-slate-400';
 
 export default function AgentControlPanel() {
+  const [params] = useSearchParams();
+  const campaignFilter = params.get('campaign');
+  const runFilter = params.get('run');
   const [runs, setRuns]       = useState<AgentRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter]   = useState<'all'|AgentRun['status']>('all');
-  const [feed, setFeed]       = useState<Array<{type: FeedType; msg: string; time: string}>>([]);
-  const feedIdx = useRef(0);
-  // Ticking clock so "elapsed" on each running agent advances live.
+  const [live, setLive]       = useState(false);
+  const [liveDetail, setLiveDetail] = useState(appsyncConfigured() ? 'Connecting…' : 'Poll fallback');
+  const [notice, setNotice]   = useState<string | null>(null);
+  const [accountPaused, setAccountPaused] = useState(false);
+  const [pauseReason, setPauseReason] = useState<string | null>(null);
+  const [usage, setUsage]     = useState<{ period: string | null; items: { resource: unknown; used: number; quota: number }[] } | null>(null);
   const now = useNow(30_000);
 
-  function makeEntry(offset = 0) {
-    const d = FEED_DATA[feedIdx.current++ % FEED_DATA.length];
-    const t = new Date(Date.now() - offset);
-    const time = [t.getHours(), t.getMinutes(), t.getSeconds()].map(n => String(n).padStart(2,'0')).join(':');
-    return { ...d, time };
-  }
-
-  const loadRuns = useCallback(async () => {
-    setLoading(true);
+  const loadRuns = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
-      const res = await agentRunsApi.list();
+      const [res, pause, meter] = await Promise.all([
+        agentRunsApi.list(1, 100),
+        controlApi.pauseStatus().catch((): { paused?: boolean; reason?: string } => ({ paused: false })),
+        agentRunsApi.usage().catch(() => null),
+      ]);
       setRuns(res.items);
-    } catch { /* error */ }
-    finally { setLoading(false); }
+      setAccountPaused(Boolean(pause.paused) || pause.reason === 'account_kill');
+      setPauseReason(pause.paused ? String(pause.reason ?? 'paused') : null);
+      if (meter) setUsage(meter);
+    } catch { /* keep last good table */ }
+    finally { if (!silent) setLoading(false); }
   }, []);
 
   useEffect(() => {
     loadRuns();
-    const initial = Array.from({length: 7}, (_, i) => makeEntry((7-i)*2000));
-    setFeed(initial);
-    const t = setInterval(() => setFeed(p => [...p, makeEntry()].slice(-12)), 2500);
+    const t = setInterval(() => { void loadRuns(true); }, FEED_POLL_MS);
     return () => clearInterval(t);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadRuns]);
+
+  useEffect(() => {
+    if (!campaignFilter && !runFilter) return;
+    void intentApi.recordEvent('run_inspected', {
+      campaignId: campaignFilter,
+      runId: runFilter,
+    }).catch(() => { /* activation log is best-effort */ });
+  }, [campaignFilter, runFilter]);
+
+  useEffect(() => {
+    const unsub = subscribeAgentActions(
+      () => { void loadRuns(true); },
+      (isLive, detail) => {
+        setLive(isLive);
+        setLiveDetail(isLive ? 'Live push' : (detail ?? 'Poll fallback'));
+      },
+    );
+    return unsub;
+  }, [loadRuns]);
+
+  const feed = useMemo(() => toFeed(runs), [runs]);
 
   async function handleAction(run: AgentRun, action: 'pause'|'resume'|'kill') {
     try {
-      // These are status transitions on agent_run. crm-write answers {ok, id},
-      // not the updated row, so refresh from the server instead of guessing.
-      const status = action === 'pause' ? 'paused' : action === 'resume' ? 'running' : 'failed';
-      await agentRunsApi.setStatus(run, status);
+      const result = action === 'pause'
+        ? await controlApi.pauseRun(run.id)
+        : action === 'resume'
+          ? await controlApi.resumeRun(run.id)
+          : await controlApi.killRun(run.id);
+      if (result.callMayComplete && result.note) setNotice(result.note);
+      else if (result.error) setNotice(result.error);
+      else setNotice(null);
       await loadRuns();
-    } catch { /* error */ }
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : 'Control action failed');
+    }
   }
 
-  const filtered = filter === 'all' ? runs : runs.filter(r => r.status === filter);
-  const runCount = runs.filter(r => r.status === 'running').length;
+  async function handleAccountKill() {
+    if (!window.confirm('Stop every running execution for this workspace and pause outbound?')) return;
+    try {
+      await controlApi.killTenant();
+      setNotice('Account-wide kill is in effect. Outbound is paused until you clear it.');
+      await loadRuns();
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : 'Account kill failed');
+    }
+  }
+
+  async function handleClearKill() {
+    try {
+      await controlApi.clearTenantKill();
+      setNotice('Account-wide kill cleared. Existing paused runs still need Resume.');
+      await loadRuns();
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : 'Could not clear kill');
+    }
+  }
+
+  const scoped = runs.filter((r) => {
+    if (runFilter) return r.id === runFilter;
+    if (campaignFilter) return r.campaignId === campaignFilter;
+    return true;
+  });
+  const filtered = filter === 'all' ? scoped : scoped.filter(r => r.status === filter);
+  const runCount = scoped.filter(r => r.status === 'running').length;
 
   return (
     <AppShell>
       <SEO title="Agent Control Panel — ImpulsoIQ" description="Real-time AI agent monitoring and control" />
       <div className="px-4 sm:px-6 py-6">
 
-        {/* Header */}
-        <div className="flex items-center justify-between mb-6">
+        <div className="flex items-start justify-between gap-4 mb-6">
           <div>
             <h1 className="text-[1.25rem] font-extrabold tracking-tight text-slate-900 dark:text-white">Agent Control Panel</h1>
-            <div className="flex items-center gap-1.5 mt-0.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              <p className="text-[0.82rem] text-emerald-600 dark:text-emerald-400 font-medium">{runCount} agents running</p>
+            <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+              <span className={cn('w-1.5 h-1.5 rounded-full', live ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400')} />
+              <p className={cn('text-[0.82rem] font-medium', live ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500')}>
+                {runCount} agents running
+              </p>
               <span className="text-slate-300 dark:text-slate-700">·</span>
               <p className="text-[0.82rem] text-slate-400 dark:text-slate-600">{runs.length} total runs</p>
+              <span className="text-slate-300 dark:text-slate-700">·</span>
+              <p className="text-[0.82rem] text-slate-400 dark:text-slate-600">
+                {live ? 'Live' : 'Polling every 15s (fallback)'} — {liveDetail}
+              </p>
             </div>
+            <p className="text-[0.75rem] text-slate-500 dark:text-slate-500 mt-2 max-w-2xl">
+              Pause and kill call StopExecution. Standard Step Functions cannot freeze in place; Resume starts a new execution from the stored input.
+            </p>
+            {(campaignFilter || runFilter) && (
+              <p className="text-[0.75rem] text-indigo-600 dark:text-indigo-400 mt-1">
+                Showing {runFilter ? `run ${runFilter}` : `campaign ${campaignFilter}`}.{' '}
+                <Link to="/control-panel" className="underline">Show all</Link>
+              </p>
+            )}
           </div>
-          <button onClick={loadRuns} className="w-8 h-8 rounded-xl border border-slate-200 dark:border-white/[0.1] flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 hover:border-slate-300 dark:hover:border-white/20 transition-all">
-            <RefreshCw size={14} />
-          </button>
+          <div className="flex items-center gap-2">
+            {accountPaused ? (
+              <button onClick={handleClearKill}
+                className="h-8 px-3 rounded-xl border border-amber-300 dark:border-amber-500/40 text-[0.75rem] font-semibold text-amber-700 dark:text-amber-400">
+                Clear account kill
+              </button>
+            ) : (
+              <button onClick={handleAccountKill}
+                className="h-8 px-3 rounded-xl border border-red-200 dark:border-red-500/30 flex items-center gap-1.5 text-[0.75rem] font-semibold text-red-600 dark:text-red-400">
+                <ShieldOff size={12} /> Kill all
+              </button>
+            )}
+            <button onClick={() => loadRuns()} aria-label="Refresh runs" className="w-8 h-8 rounded-xl border border-slate-200 dark:border-white/[0.1] flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 hover:border-slate-300 dark:hover:border-white/20 transition-all">
+              <RefreshCw size={14} />
+            </button>
+          </div>
         </div>
+
+        {accountPaused && (
+          <div className="mb-4 rounded-xl border border-red-200 dark:border-red-500/30 bg-red-50 dark:bg-red-500/10 px-4 py-3 text-[0.82rem] text-red-800 dark:text-red-200">
+            Outbound is paused{pauseReason ? `: ${pauseReason.replace(/_/g, ' ')}` : ''}. Email and SMS will not send until this flag clears.
+          </div>
+        )}
+
+        {notice && (
+          <div className="mb-4 rounded-xl border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 px-4 py-3 text-[0.82rem] text-amber-800 dark:text-amber-200">
+            {notice}
+          </div>
+        )}
+
+        {usage && usage.items.length > 0 && (
+          <div className="mb-4 flex flex-wrap gap-2">
+            {usage.items.map((item) => (
+              <span key={String(item.resource)} className="text-[0.7rem] font-medium px-2 py-1 rounded-lg bg-slate-100 dark:bg-white/[0.05] text-slate-600 dark:text-slate-400">
+                {String(item.resource)} {item.used}/{item.quota || '—'}
+                {usage.period ? ` · ${usage.period}` : ''}
+              </span>
+            ))}
+          </div>
+        )}
 
         <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-5">
 
-          {/* Run table */}
           <div className="space-y-3">
-            {/* Filter tabs */}
             <div className="flex items-center gap-1 bg-slate-100 dark:bg-white/[0.04] rounded-xl p-1 w-fit">
               {(['all','running','paused','completed','failed'] as const).map(f => (
                 <button key={f} onClick={() => setFilter(f)}
@@ -138,11 +280,10 @@ export default function AgentControlPanel() {
               ))}
             </div>
 
-            {/* Table */}
             <div className="bg-white dark:bg-[#0d1526] border border-slate-200 dark:border-white/[0.065] rounded-2xl overflow-hidden">
               <div className="grid px-4 py-2.5 border-b border-slate-100 dark:border-white/[0.04] text-[0.67rem] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-600 bg-slate-50/60 dark:bg-white/[0.02]"
-                style={{ gridTemplateColumns: '1fr 80px 80px 80px 100px' }}>
-                <span>Contact</span><span>Status</span><span>Agent</span><span>Started</span><span className="text-right">Actions</span>
+                style={{ gridTemplateColumns: '1fr 80px 80px 90px 100px' }}>
+                <span>Contact / run</span><span>Status</span><span>Agent</span><span>Started</span><span className="text-right">Actions</span>
               </div>
 
               {loading ? (
@@ -152,34 +293,37 @@ export default function AgentControlPanel() {
               ) : (
                 filtered.map((r, i) => {
                   const elapsed = Math.floor((now - new Date(r.startedAt).getTime()) / 60000);
+                  const who = [r.firstName, r.lastName].filter(Boolean).join(' ') || (r.contactId ? 'Unknown contact' : 'Workspace run');
                   return (
                     <motion.div key={r.id} initial={{opacity:0}} animate={{opacity:1}} transition={{delay:i*0.03}}
                       className="grid px-4 py-3 border-b border-slate-50 dark:border-white/[0.03] last:border-0 items-center text-[0.8rem] hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors group"
-                      style={{ gridTemplateColumns: '1fr 80px 80px 80px 100px' }}>
+                      style={{ gridTemplateColumns: '1fr 80px 80px 90px 100px' }}>
                       <div className="min-w-0">
-                        {/* first/last name are joined from `contact` by
-                            list_agent_runs. There is no company on this row. */}
-                        <p className="font-semibold text-slate-800 dark:text-slate-200 truncate">
-                          {[r.firstName, r.lastName].filter(Boolean).join(' ') || 'Unknown contact'}
+                        <p className="font-semibold text-slate-800 dark:text-slate-200 truncate">{who}</p>
+                        <p className="text-[0.7rem] text-slate-400 dark:text-slate-600 truncate">
+                          {r.error || r.agentType}
+                          {r.costJson && typeof r.costJson === 'object' && Object.keys(r.costJson).length > 0
+                            ? ` · ${JSON.stringify(r.costJson)}` : ''}
                         </p>
-                        <p className="text-[0.7rem] text-slate-400 dark:text-slate-600 truncate">{r.agentType}</p>
                       </div>
                       <span className={cn('inline-flex items-center gap-1.5 text-[0.63rem] font-bold px-1.5 py-0.5 rounded-lg w-fit', STATUS_CLS[r.status])}>
                         <span className={cn('w-1.5 h-1.5 rounded-full', STATUS_DOT[r.status])} />
                         {r.status}
                       </span>
-                      <span className={cn('text-[0.65rem] font-bold px-1.5 py-0.5 rounded w-fit', AGENT_CLS[r.agentType])}>{r.agentType}</span>
+                      <span className={cn('text-[0.65rem] font-bold px-1.5 py-0.5 rounded w-fit', AGENT_CLS[r.agentType] ?? FALLBACK_AGENT_CLS)}>
+                        {AGENT_LABEL[r.agentType] ?? r.agentType}
+                      </span>
                       <span className="text-[0.72rem] text-slate-400 dark:text-slate-600">{elapsed}m ago</span>
                       <div className="flex items-center gap-1 justify-end">
                         {r.status === 'running' && (
                           <button onClick={() => handleAction(r, 'pause')}
-                            className="w-6 h-6 rounded-md bg-amber-100 dark:bg-amber-500/15 flex items-center justify-center text-amber-600 dark:text-amber-400 hover:scale-110 transition-transform" title="Pause">
+                            className="w-6 h-6 rounded-md bg-amber-100 dark:bg-amber-500/15 flex items-center justify-center text-amber-600 dark:text-amber-400 hover:scale-110 transition-transform" title="Pause (stops the execution)">
                             <Pause size={10} />
                           </button>
                         )}
                         {r.status === 'paused' && (
                           <button onClick={() => handleAction(r, 'resume')}
-                            className="w-6 h-6 rounded-md bg-emerald-100 dark:bg-emerald-500/15 flex items-center justify-center text-emerald-600 dark:text-emerald-400 hover:scale-110 transition-transform" title="Resume">
+                            className="w-6 h-6 rounded-md bg-emerald-100 dark:bg-emerald-500/15 flex items-center justify-center text-emerald-600 dark:text-emerald-400 hover:scale-110 transition-transform" title="Resume (new execution from stored input)">
                             <Play size={10} />
                           </button>
                         )}
@@ -200,25 +344,31 @@ export default function AgentControlPanel() {
             </div>
           </div>
 
-          {/* Live activity feed */}
           <div className="bg-white dark:bg-[#0d1526] border border-slate-200 dark:border-white/[0.065] rounded-2xl overflow-hidden flex flex-col h-fit">
             <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-100 dark:border-white/[0.05] flex-shrink-0">
-              <h3 className="text-[0.88rem] font-bold text-slate-900 dark:text-white">Live Feed</h3>
-              <span className="flex items-center gap-1.5 text-[0.7rem] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-500/20">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                Real-time
+              <h3 className="text-[0.88rem] font-bold text-slate-900 dark:text-white">Recent activity</h3>
+              <span className={cn(
+                'flex items-center gap-1.5 text-[0.7rem] font-semibold px-2 py-0.5 rounded-full border',
+                live
+                  ? 'text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/30'
+                  : 'text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-white/[0.04] border-slate-200 dark:border-white/[0.08]',
+              )}>
+                {live ? 'Live' : <><RefreshCw size={10} /> Poll {FEED_POLL_MS / 1000}s</>}
               </span>
             </div>
             <div className="flex-1 overflow-y-auto px-2 py-2 space-y-0.5 max-h-[520px]" role="log" aria-live="polite">
+              {!loading && feed.length === 0 && (
+                <p className="py-10 text-center text-[0.8rem] text-slate-400 dark:text-slate-600">No agent activity yet</p>
+              )}
               <AnimatePresence initial={false}>
-                {feed.map((e, i) => (
-                  <motion.div key={i} initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} transition={{duration:0.25}}
+                {feed.map(e => (
+                  <motion.div key={e.key} initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} transition={{duration:0.25}}
                     className="flex items-baseline gap-2 px-2 py-1.5 rounded-xl hover:bg-slate-50 dark:hover:bg-white/[0.03] transition-colors text-[0.73rem] font-mono">
-                    <span className="text-slate-400 dark:text-slate-600 text-[0.65rem] flex-shrink-0 w-[54px]">{e.time}</span>
-                    <span className={cn('text-[0.6rem] font-bold px-1.5 py-0.5 rounded flex-shrink-0 w-[56px] text-center', FEED_CLS[e.type])}>
-                      {FEED_LABEL[e.type]}
+                    <span className="text-slate-400 dark:text-slate-600 text-[0.65rem] flex-shrink-0 w-[54px]">{clockTime(e.at, now)}</span>
+                    <span className={cn('text-[0.6rem] font-bold px-1.5 py-0.5 rounded flex-shrink-0 w-[60px] text-center', AGENT_CLS[e.agentType] ?? FALLBACK_AGENT_CLS)}>
+                      {AGENT_LABEL[e.agentType] ?? e.agentType}
                     </span>
-                    <span className="text-slate-600 dark:text-slate-400 truncate text-[0.7rem]">{e.msg}</span>
+                    <span className={cn('truncate text-[0.7rem]', e.failed ? 'text-red-500 dark:text-red-400' : 'text-slate-600 dark:text-slate-400')}>{e.text}</span>
                   </motion.div>
                 ))}
               </AnimatePresence>

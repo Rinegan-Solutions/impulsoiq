@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom';
 export function Footer() {
   return (
     <footer className="border-t border-slate-200 dark:border-white/[0.065] bg-slate-50 dark:bg-[#080e1d] px-4 sm:px-6 py-8">
@@ -15,14 +16,18 @@ export function Footer() {
           {[
             ['/#features', 'Features'],
             ['/#how', 'How it works'],
-            ['/#testimonials', 'Stories'],
             ['/pricing', 'Pricing'],
             ['/sign-up', 'Get access'],
             ['/privacy', 'Privacy'],
             ['/terms', 'Terms'],
-          ].map(([href, label]) => (
-            <a key={label} href={href} className="text-[0.83rem] text-slate-500 dark:text-slate-500 hover:text-slate-900 dark:hover:text-white transition-colors">{label}</a>
-          ))}
+          ].map(([href, label]) => {
+            const cls = 'text-[0.83rem] text-slate-500 dark:text-slate-500 hover:text-slate-900 dark:hover:text-white transition-colors';
+            // In-page anchors stay plain links so the browser scrolls to them;
+            // routes go through the router so they never reload the app.
+            return href.includes('#')
+              ? <a key={label} href={href} className={cls}>{label}</a>
+              : <Link key={label} to={href} className={cls}>{label}</Link>;
+          })}
         </nav>
         <div className="text-[0.74rem] text-slate-400 dark:text-slate-600">
           © 2026 ImpulsoIQ · Built by Rinegan Solutions Limited
