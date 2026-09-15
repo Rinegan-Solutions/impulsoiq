@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Search, Plus, MoreHorizontal, ArrowUpDown, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Search, Plus, MoreHorizontal, ArrowUpDown, ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
 import { accountsApi, contactsApi } from '@/api/client';
 import type { Account, Contact } from '@/api/schemas';
 import { AppShell } from '@/components/app/AppShell';
@@ -110,6 +110,12 @@ export default function ContactsPage() {
             <p className="text-[0.82rem] text-slate-500 dark:text-slate-400 mt-0.5">{total.toLocaleString()} total contacts</p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+            <Link
+              to="/research"
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-[0.78rem] font-semibold rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:border-indigo-500/30 dark:bg-indigo-500/10 dark:text-indigo-300 dark:hover:bg-indigo-500/20 transition-colors"
+            >
+              <Sparkles size={13} /> Generate leads
+            </Link>
             <CsvImportBar
               sampleName="contacts-sample.csv"
               sampleCsv={CONTACT_SAMPLE}

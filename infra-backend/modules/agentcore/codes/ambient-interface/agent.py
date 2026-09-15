@@ -12,13 +12,6 @@ from __future__ import annotations
 import os
 
 from strands import Agent
-from strands.experimental.bidi.agent import BidiAgent
-
-try:
-    from strands.experimental.bidi.models.nova_sonic import BidiNovaSonicModel as SonicModel
-except ImportError:
-    from strands.experimental.bidi.models import BedrockNovaSonicModel as SonicModel
-
 from impulsoiq_model import build_model
 from .tools import (
     approve_item,
@@ -107,17 +100,17 @@ def _spoken(result: object) -> str:
     return str(result).strip()
 
 
-def _sonic_model() -> SonicModel:
-    """Nova 2 Sonic: 16 kHz in, 24 kHz out (AWS default output). Keys differ by Strands class."""
+def _sonic_model():
+    """Nova 2 Sonic: 16 kHz in, 24 kHz out. Import path follows current Strands bidi extras."""
+    from strands.experimental.bidi.models import BedrockNovaSonicModel
     try:
-        return SonicModel(
+        return BedrockNovaSonicModel(
             model_id=MODEL,
             region=VOICE_REGION,
             voice="matthew",
-            audio={"input": {"sample_rate": 16000}, "output": {"sample_rate": 24000}},
         )
     except TypeError:
-        return SonicModel(
+        return BedrockNovaSonicModel(
             model_id=MODEL,
             client_config={"region": VOICE_REGION},
             provider_config={
@@ -132,8 +125,9 @@ def _sonic_model() -> SonicModel:
         )
 
 
-def make_bidi_agent(tenant_id: str, user_id: str) -> BidiAgent:
+def make_bidi_agent(tenant_id: str, user_id: str):
     """One BidiAgent per WebSocket — tools are bound to the signed workspace."""
+    from strands.experimental.bidi import BidiAgent
     return BidiAgent(
         model=_sonic_model(),
         system_prompt=(

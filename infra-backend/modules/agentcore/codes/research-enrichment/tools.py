@@ -17,6 +17,7 @@ import os
 import httpx
 import boto3
 from impulsoiq_secrets import app_secret
+from strands import tool
 
 _lambda = boto3.client("lambda", region_name=os.environ.get("AWS_REGION", "eu-west-2"))
 
@@ -479,12 +480,36 @@ def execute_waterfall(tenant_id: str, contact_id: str) -> dict:
     providers = _providers()
     verify_url = os.environ.get("EMAIL_VERIFICATION_API_URL", "")
     if not providers and not verify_url:
+        # Prod has no licensed enrichment URL. Do not invent firmographics, but
+        # do not crash the campaign either — continue with CRM fields only.
+        attributed: list[dict] = []
+        for field in ("email", "title", "firstName", "lastName", "phone", "accountId"):
+            val = contact.get(field)
+            if val not in (None, "", []):
+                attributed.append({
+                    "field": field,
+                    "value": str(val),
+                    "source": "crm",
+                    "confidence": 1.0,
+                })
+        email = (contact.get("email") or "").strip()
+        if not email:
+            return {
+                "ok": False,
+                "gap": "no_enrichment_providers",
+                "message": "No enrichment providers configured and this contact has no email.",
+                "paidCalls": 0,
+                "contactId": contact_id,
+            }
         return {
-            "ok": False,
-            "gap": "no_enrichment_providers",
-            "message": "No enrichment or email-verification providers are configured. Outbound will not invent industry or headcount.",
+            "ok": True,
+            "gap": None,
+            "verifiedEmail": False,
             "paidCalls": 0,
+            "source": "crm_record",
             "contactId": contact_id,
+            "fields": attributed,
+            "message": "Paid enrichment is not configured; using CRM fields only. No industry or headcount was invented.",
         }
 
     paid = 0

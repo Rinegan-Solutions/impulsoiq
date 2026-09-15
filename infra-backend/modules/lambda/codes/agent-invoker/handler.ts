@@ -109,6 +109,13 @@ async function markRun(
   }));
 }
 
+function ensureSessionId(raw?: string): string {
+  // AgentCore rejects session ids shorter than 33 characters. A UUID is 36.
+  const cleaned = (raw ?? randomUUID()).replace(/[^A-Za-z0-9_-]/g, '');
+  if (cleaned.length >= 33) return cleaned.slice(0, 256);
+  return (cleaned + randomUUID().replace(/-/g, '')).slice(0, 256);
+}
+
 export const handler = async (event: InvokeRequest) => {
   const throwOnError = THROW_ON_ERROR || event?.throwOnError === true;
   const agentRuntimeArn = event?.agentRuntimeArn;
@@ -123,7 +130,7 @@ export const handler = async (event: InvokeRequest) => {
     return { ok: false, agentRuntimeArn: null, error };
   }
 
-  const sessionId = event.runtimeSessionId ?? randomUUID();
+  const sessionId = ensureSessionId(event.runtimeSessionId);
 
   try {
     const resp = await client.send(

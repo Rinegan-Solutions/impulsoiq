@@ -76,7 +76,7 @@ export function modesFor(role: Role | null, tier: string | undefined): NavMode[]
         { href: '/analytics', label: 'Analytics', icon: BarChart3 },
       ],
     },
-    { id: 'more', href: '/settings', label: 'More', icon: LayoutGrid, children: moreChildren },
+    { id: 'more', href: '/dashboard', label: 'More', icon: LayoutGrid, children: moreChildren },
   ];
 }
 

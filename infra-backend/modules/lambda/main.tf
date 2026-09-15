@@ -161,10 +161,12 @@ resource "aws_iam_role_policy" "lambda" {
           "bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
         ]
         Resource = [
-          "arn:aws:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:runtime/${var.project}_*_${var.env}",
-          "arn:aws:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:runtime/${var.project}_*_${var.env}/*",
-          "arn:aws:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:runtime/${var.project}_*_${var.env}-*",
-          "arn:aws:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:runtime/${var.project}_*_${var.env}-*/*",
+          # IAM '*' does not match '/'. HTTP invoke uses the runtime ARN;
+          # WebSocket uses runtime/{id}/runtime-endpoint/{name}.
+          "arn:aws:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:runtime/${var.project}_*",
+          "arn:aws:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:runtime/${var.project}_*/*",
+          "arn:aws:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:runtime/${var.project}_*/*/*",
+          "arn:aws:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:runtime/${var.project}_*/*/*/*",
         ]
       },
       {
