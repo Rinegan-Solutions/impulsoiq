@@ -278,16 +278,18 @@ function runtimeSessionId(tenantId: string, userId: string, sessionId: string): 
 async function presignBidiUrl(identity: ConnectionIdentity, sessionId: string): Promise<string> {
   const agentRuntimeArn = await ssmParam('AMBIENT_AGENT_ARN_SSM_PATH');
   const hostname = `bedrock-agentcore.${REGION}.amazonaws.com`;
-  // ARN contains ":" and "/". Encode it as a single path segment, then tell
-  // SigV4 not to encode again (% → %25), which invalidates the signature and
-  // is the usual cause of a browser WebSocket that errors on open.
+  // Match AgentCoreRuntimeClient.generate_presigned_url: quote the ARN as one
+  // path segment (":" and "/" → %3A / %2F) and let SigV4 double-escape that
+  // segment in the canonical URI (% → %25). uriEscapePath: false signed the
+  // single-encoded path and AgentCore returned 403 on the browser handshake.
+  // https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-get-started-websocket.html
   const path = `/runtimes/${encodeURIComponent(agentRuntimeArn)}/ws`;
   const signer = new SignatureV4({
     credentials: defaultProvider(),
     region: REGION,
     service: 'bedrock-agentcore',
     sha256: Sha256,
-    uriEscapePath: false,
+    uriEscapePath: true,
   });
   const request = new HttpRequest({
     method: 'GET',

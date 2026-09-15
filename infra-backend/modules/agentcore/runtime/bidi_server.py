@@ -106,6 +106,33 @@ async def _receive_json(websocket: WebSocket):
     return json.loads(raw)
 
 
+async def _receive_event(websocket: WebSocket):
+    """JSON dicts → Bidi*InputEvent, matching the Strands WebSocket sample."""
+    data = await _receive_json(websocket)
+    if not isinstance(data, dict) or "type" not in data:
+        return data
+    event_type = data["type"]
+    event_data = {k: v for k, v in data.items() if k != "type"}
+    try:
+        from strands.experimental.bidi.types.events import (
+            BidiAudioInputEvent,
+            BidiImageInputEvent,
+            BidiTextInputEvent,
+        )
+    except ImportError:
+        return data
+    try:
+        if event_type == "bidi_audio_input":
+            return BidiAudioInputEvent(**event_data)
+        if event_type == "bidi_text_input":
+            return BidiTextInputEvent(**event_data)
+        if event_type == "bidi_image_input":
+            return BidiImageInputEvent(**event_data)
+    except (TypeError, ValueError):
+        return data
+    return data
+
+
 @app.get("/ping")
 def ping() -> dict[str, str]:
     return {"status": "healthy", "agent": AGENT_MODULE}
@@ -160,8 +187,10 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     log.info("bidi session start tenant=%s user=%s", tenant_id, user_id)
     try:
+        # Official contract: receive_json / send_json of bidi_* events.
+        # https://strandsagents.com/docs/user-guide/concepts/bidirectional-streaming/io/
         await bidi.run(
-            inputs=[lambda: _receive_json(websocket)],
+            inputs=[lambda: _receive_event(websocket)],
             outputs=[lambda event: websocket.send_json(_event_payload(event))],
         )
     except WebSocketDisconnect:

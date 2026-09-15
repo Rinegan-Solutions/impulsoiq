@@ -108,6 +108,10 @@ def _sonic_model():
             model_id=MODEL,
             region=VOICE_REGION,
             voice="matthew",
+            audio={
+                "input": {"sample_rate": 16000},
+                "output": {"sample_rate": 24000},
+            },
         )
     except TypeError:
         return BedrockNovaSonicModel(

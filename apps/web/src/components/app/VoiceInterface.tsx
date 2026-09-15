@@ -265,6 +265,14 @@ export function VoiceInterface() {
     const ws = new WebSocket(url);
     bidiRef.current = ws;
 
+    const markLive = () => {
+      const first = !bidiReadyRef.current;
+      bidiReadyRef.current = true;
+      bidiRetriesRef.current = 0;
+      if (first) setLive(true);
+      if (!micStopRef.current) void startMic(ws);
+    };
+
     ws.onmessage = (ev) => {
       let data: BidiMessage;
       try { data = JSON.parse(String(ev.data)) as BidiMessage; } catch { return; }
@@ -274,11 +282,10 @@ export function VoiceInterface() {
         setLive(false);
         return;
       }
+      // Strands may emit bidi_usage before bidi_connection_start (or skip start
+      // entirely). Any non-error event means the Nova Sonic session is up.
+      if (data.type && data.type !== 'bidi_connection_close') markLive();
       if (data.type === 'bidi_connection_start' || data.type === 'bidi_connection_restart') {
-        bidiReadyRef.current = true;
-        bidiRetriesRef.current = 0;
-        setLive(true);
-        if (!micStopRef.current) void startMic(ws);
         return;
       }
       if (data.type === 'bidi_audio_stream' && data.audio) {
@@ -302,6 +309,8 @@ export function VoiceInterface() {
     ws.onopen = () => {
       setLive(true);
       setMicHint('Connecting to Nova Sonic…');
+      // Handshake already succeeded. Do not wait for connection_start to talk.
+      markLive();
     };
 
     ws.onclose = () => {
